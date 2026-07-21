@@ -8,6 +8,7 @@ class FatigueDetector(object):
         "ALERTA", "ALERTA_CRITICA", "ROSTRO_NO_DETECTADO", "MANTENIMIENTO",
         "PARO_EMERGENCIA", "ERROR"
     )
+    RECOVERY_STATES = ("POSIBLE_SOMNOLENCIA", "ALERTA", "ALERTA_CRITICA")
 
     def __init__(self, config):
         self.config = config["fatigue"]
@@ -28,7 +29,7 @@ class FatigueDetector(object):
         self.nod_since = None
         self.gaze_away_since = None
         self.no_face_since = None
-        self.last_open_time = time.monotonic()
+        self.recovery_since = None
         self.last_transition = time.monotonic()
         self.perclos = deque(maxlen=3000)
         self.blinks = deque(maxlen=120)
@@ -50,7 +51,7 @@ class FatigueDetector(object):
         self.nod_since = None
         self.gaze_away_since = None
         self.no_face_since = None
-        self.last_open_time = time.monotonic()
+        self.recovery_since = None
         self.last_transition = time.monotonic()
         self.perclos.clear()
         self.blinks.clear()
@@ -164,7 +165,6 @@ class FatigueDetector(object):
                     self.last_blink_duration = dur
             self.closed_since = None
             self.closed_duration = 0.0
-            self.last_open_time = now
         while self.blinks and now - self.blinks[0] > 60.0:
             self.blinks.popleft()
 
@@ -227,35 +227,49 @@ class FatigueDetector(object):
         if reliable and closed and cd < blink_display_seconds:
             return self._set("PARPADEO", "Parpadeo en curso", now)
         if cd >= float(self.config["critical_closed_seconds"]):
-            return self._set("ALERTA_CRITICA", "Cierre ocular critico: %.1f s" % cd, now)
+            return self._set_risk("ALERTA_CRITICA", "Cierre ocular critico: %.1f s" % cd, now)
         if cd >= float(self.config["alert_closed_seconds"]):
-            return self._set("ALERTA", "Cierre ocular prolongado: %.1f s" % cd, now)
+            return self._set_risk("ALERTA", "Cierre ocular prolongado: %.1f s" % cd, now)
         if cd >= float(self.config["prealert_closed_seconds"]):
-            return self._set("POSIBLE_SOMNOLENCIA", "Cierre ocular sostenido: %.1f s" % cd, now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "Cierre ocular sostenido: %.1f s" % cd, now)
         if self.calibrated_profile == "ASLEEP":
             if self.calibrated_profile_seconds >= float(self.config["critical_closed_seconds"]):
-                return self._set("ALERTA_CRITICA", "Perfil dormido sostenido: %.1f s" % self.calibrated_profile_seconds, now)
+                return self._set_risk("ALERTA_CRITICA", "Perfil dormido sostenido: %.1f s" % self.calibrated_profile_seconds, now)
             if self.calibrated_profile_seconds >= float(self.config["alert_closed_seconds"]):
-                return self._set("ALERTA", "Perfil dormido: %.1f s" % self.calibrated_profile_seconds, now)
+                return self._set_risk("ALERTA", "Perfil dormido: %.1f s" % self.calibrated_profile_seconds, now)
             if self.calibrated_profile_seconds >= float(self.config["prealert_closed_seconds"]):
-                return self._set("POSIBLE_SOMNOLENCIA", "Transicion a perfil dormido", now)
+                return self._set_risk("POSIBLE_SOMNOLENCIA", "Transicion a perfil dormido", now)
         if self.calibrated_profile == "DROWSY" and self.calibrated_profile_seconds >= self.profile_warning_seconds:
-            return self._set("POSIBLE_SOMNOLENCIA", "Perfil calibrado de somnolencia: %.1f s" % self.calibrated_profile_seconds, now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "Perfil calibrado de somnolencia: %.1f s" % self.calibrated_profile_seconds, now)
         if perclos >= float(self.config["perclos_alert_threshold"]):
-            return self._set("ALERTA", "PERCLOS elevado: %.0f%%" % (perclos * 100.0), now)
+            return self._set_risk("ALERTA", "PERCLOS elevado: %.0f%%" % (perclos * 100.0), now)
         if perclos >= float(self.config["perclos_warning_threshold"]):
-            return self._set("POSIBLE_SOMNOLENCIA", "PERCLOS preventivo: %.0f%%" % (perclos * 100.0), now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "PERCLOS preventivo: %.0f%%" % (perclos * 100.0), now)
         if self.possible_yawn and (cd > 0.3 or len(self.yawns) >= 2):
-            return self._set("POSIBLE_SOMNOLENCIA", "Bostezo con evidencia secundaria", now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "Bostezo con evidencia secundaria", now)
         if self.possible_nod and cd > 0.25:
-            return self._set("POSIBLE_SOMNOLENCIA", "Cabeceo con cierre ocular", now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "Cabeceo con cierre ocular", now)
         if self.gaze_away_seconds >= float(self.config["gaze_away_warning_seconds"]):
-            return self._set("POSIBLE_SOMNOLENCIA", "Mirada fuera del frente por %.1f s" % self.gaze_away_seconds, now)
-        if self.state in ("ALERTA", "ALERTA_CRITICA", "POSIBLE_SOMNOLENCIA") and now - self.last_open_time < float(self.config["recovery_seconds"]):
-            return self._set(self.state, "Periodo de recuperacion", now)
+            return self._set_risk("POSIBLE_SOMNOLENCIA", "Mirada fuera del frente por %.1f s" % self.gaze_away_seconds, now)
+        if self.state in self.RECOVERY_STATES:
+            if self.recovery_since is None:
+                self.recovery_since = now
+            recovery_elapsed = now - self.recovery_since
+            if recovery_elapsed < float(self.config["recovery_seconds"]):
+                return self._set(
+                    self.state,
+                    "Periodo de recuperacion: %.1f s" % recovery_elapsed,
+                    now,
+                )
         return self._set("NORMAL", "Indicadores dentro de rango", now)
 
+    def _set_risk(self, state, reason, now):
+        self.recovery_since = None
+        return self._set(state, reason, now)
+
     def _set(self, state, reason, now):
+        if state not in self.RECOVERY_STATES:
+            self.recovery_since = None
         if state != self.state:
             self.last_transition = now
         self.state = state

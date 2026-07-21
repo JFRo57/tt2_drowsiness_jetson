@@ -187,6 +187,11 @@ recuperacion y finalmente `NORMAL`. Debido a esta reevaluacion, un estado puede
 saltar directamente a otro si las metricas del frame ya cumplen una condicion
 de mayor prioridad.
 
+Cuando desaparecen las condiciones de riesgo, `recovery_since` se fija una sola
+vez y el nivel anterior se conserva durante `recovery_seconds` (1.0 s en la
+configuracion actual). Una nueva evidencia de riesgo cancela ese conteo; al
+desaparecer nuevamente, comienza un periodo completo desde cero.
+
 
 ## Modos de operacion
 

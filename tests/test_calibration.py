@@ -171,6 +171,39 @@ class FatigueDetectorCalibrationTests(unittest.TestCase):
         self.assertEqual("DESCONOCIDO", self.detector.calibrated_profile)
         self.assertEqual(0.0, self.detector.calibrated_profile_seconds)
 
+    def test_recovery_timer_releases_alert_after_configured_delay(self):
+        self.detector.state = "ALERTA"
+
+        state, reason = self.detector._decide(10.0, {"perclos": 0.0}, False, True)
+        self.assertEqual("ALERTA", state)
+        self.assertIn("Periodo de recuperacion", reason)
+        self.assertEqual(10.0, self.detector.recovery_since)
+
+        state, _ = self.detector._decide(10.9, {"perclos": 0.0}, False, True)
+        self.assertEqual("ALERTA", state)
+
+        state, _ = self.detector._decide(11.01, {"perclos": 0.0}, False, True)
+        self.assertEqual("NORMAL", state)
+        self.assertIsNone(self.detector.recovery_since)
+
+    def test_risk_reappearance_restarts_recovery_timer(self):
+        self.detector.state = "ALERTA"
+        self.detector._decide(20.0, {"perclos": 0.0}, False, True)
+
+        self.detector.closed_duration = 0.90
+        state, _ = self.detector._decide(20.5, {"perclos": 0.0}, True, True)
+        self.assertEqual("ALERTA", state)
+        self.assertIsNone(self.detector.recovery_since)
+
+        self.detector.closed_duration = 0.0
+        state, _ = self.detector._decide(21.0, {"perclos": 0.0}, False, True)
+        self.assertEqual("ALERTA", state)
+        self.assertEqual(21.0, self.detector.recovery_since)
+
+        state, _ = self.detector._decide(22.01, {"perclos": 0.0}, False, True)
+        self.assertEqual("NORMAL", state)
+        self.assertIsNone(self.detector.recovery_since)
+
 
 class PresentationCalibrationKeyTests(unittest.TestCase):
     def test_o_s_d_keys_select_distinct_profiles(self):
