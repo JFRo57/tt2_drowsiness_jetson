@@ -1,0 +1,94 @@
+{
+  "camera": {
+    "sensor_id": 0,
+    "capture_width": 1280,
+    "capture_height": 720,
+    "processing_width": 640,
+    "processing_height": 360,
+    "display_width": 1100,
+    "display_height": 620,
+    "fps": 30,
+    "flip_method": 2,
+    "reconnect_attempts": 3
+  },
+  "dlib": {
+    "predictor_path": "models/shape_predictor_68_face_landmarks.dat",
+    "upsample": 0,
+    "detection_interval_frames": 5,
+    "use_correlation_tracker": true
+  },
+  "preprocessing": {
+    "use_clahe": true,
+    "clahe_clip_limit": 2.0,
+    "clahe_grid_size": 8,
+    "use_gamma": false,
+    "gamma": 1.0
+  },
+  "fatigue": {
+    "ear_threshold": 0.22,
+    "use_session_calibration": true,
+    "blink_min_seconds": 0.08,
+    "blink_max_seconds": 0.7,
+    "prealert_closed_seconds": 0.45,
+    "alert_closed_seconds": 0.85,
+    "critical_closed_seconds": 1.6,
+    "recovery_seconds": 1.0,
+    "perclos_window_seconds": 60,
+    "perclos_warning_threshold": 0.25,
+    "perclos_alert_threshold": 0.35,
+    "mar_threshold": 0.65,
+    "yawn_min_seconds": 1.0,
+    "head_nod_pitch_threshold": 18.0,
+    "head_nod_min_seconds": 0.8,
+    "gaze_away_warning_seconds": 2.0,
+    "no_face_warning_seconds": 2.0
+  },
+  "gpio": {
+    "enabled": true,
+    "simulation_mode": false,
+    "numbering": "BOARD"
+  },
+  "buzzer": {
+    "enabled": true,
+    "type": "pwm_native",
+    "board_pin": 33,
+    "active_high": false,
+    "muted": false,
+    "idle_frequency": 3000,
+    "pwm_duty_cycle": 50,
+    "pwm_chip": 0,
+    "pwm_channel": 2,
+    "min_frequency": 2000,
+    "max_frequency": 5000
+  },
+  "leds": {
+    "enabled": true,
+    "active_high": true,
+    "green_board_pin": 29,
+    "yellow_board_pin": 31,
+    "red_board_pin": 32
+  },
+  "switch": {
+    "enabled": false,
+    "topology": "on_off_on",
+    "auto_board_pin": 35,
+    "emergency_board_pin": 37,
+    "center_mode": "MAINTENANCE",
+    "active_low": true,
+    "debounce_ms": 100
+  },
+  "interface": {
+    "presentation_enabled": true,
+    "show_landmarks": true,
+    "show_information_panel": true,
+    "show_virtual_leds": true,
+    "close_action": "FULL_SHUTDOWN"
+  },
+  "logging": {
+    "enabled": false,
+    "events_only": true,
+    "path": "logs/events.csv",
+    "save_images": false,
+    "record_video": false
+  }
+}

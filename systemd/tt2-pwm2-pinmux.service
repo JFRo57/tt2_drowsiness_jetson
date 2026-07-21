@@ -1,0 +1,12 @@
+[Unit]
+Description=Configurar PWM2 de Jetson Nano para buzzer TT2
+After=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tt2-configure-pwm2
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

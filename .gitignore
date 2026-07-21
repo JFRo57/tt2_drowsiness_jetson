@@ -1,0 +1,47 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and native build output
+build/
+dist/
+*.egg-info/
+*.so
+
+# Runtime output
+logs/
+*.log
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Large local dlib models
+models/*.dat
+models/*.bz2
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Patch and temporary files
+*.orig
+*.rej
+
