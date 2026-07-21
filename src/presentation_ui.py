@@ -42,6 +42,8 @@ class PresentationUI(object):
             cv2.putText(view, state, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 3)
         elif state == "POSIBLE_SOMNOLENCIA":
             cv2.putText(view, state, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+        if metrics.get("calibration_active"):
+            self._draw_calibration_overlay(view, metrics)
         if self.show_panel:
             view = self._add_panel(view, metrics, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode)
         cv2.imshow(self.window, view)
@@ -49,7 +51,7 @@ class PresentationUI(object):
 
     def _add_panel(self, frame, m, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
         panel_w = 430
-        h = max(frame.shape[0], 700)
+        h = max(frame.shape[0], 880)
         canvas = np.zeros((h, frame.shape[1] + panel_w, 3), dtype=np.uint8)
         canvas[:frame.shape[0], :frame.shape[1]] = frame
         x = frame.shape[1] + 15
@@ -64,7 +66,14 @@ class PresentationUI(object):
             "Rostro detectado: %s" % ("SI" if m.get("face_detected") else "NO"),
             "Calidad: %.2f" % m.get("quality", 0.0),
             "EAR izq/der/prom: %.3f / %.3f / %.3f" % (m.get("left_ear", 0.0), m.get("right_ear", 0.0), m.get("ear", 0.0)),
-            "Umbral EAR: %.3f" % detector.ear_threshold,
+            "Umbral EAR dormido: %.3f" % detector.ear_threshold,
+            "Umbral EAR somnolencia: %s" % self._fmt3(detector.drowsy_ear_threshold),
+            "Perfiles: %s" % m.get("calibration_profiles", "O:-- S:-- D:--"),
+            "Perfil detectado: %s %.0f%% / %.1f s" % (
+                m.get("calibrated_profile", "NO_CALIBRADO"),
+                float(m.get("calibrated_profile_confidence", 0.0)) * 100.0,
+                float(m.get("calibrated_profile_seconds", 0.0)),
+            ),
             "Ojos cerrados: %.2f s" % m.get("closed_seconds", 0.0),
             "Parpadeos recientes: %s" % m.get("blink_count_recent", 0),
             "PERCLOS: %.1f %%" % (m.get("perclos", 0.0) * 100.0),
@@ -84,8 +93,10 @@ class PresentationUI(object):
             "Teclas: 1 Auto  2 Mant  3 Paro",
             "Prueba salidas: 4 Normal 5 Posible",
             "6 Alerta 7 Critica 8 Sin rostro 0 Real",
-            "C Calib  L Landmarks  I Panel",
-            "M Mute  P Pausa  R Reset  Q Salir",
+            "Calibrar: O Abiertos  S Somnolencia",
+            "D Dormido  (C = Abiertos)",
+            "L Landmarks I Panel M Mute P Pausa",
+            "R Reset  Q Salir",
         ]
         for line in lines:
             cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 230), 1, cv2.LINE_AA)
@@ -95,6 +106,24 @@ class PresentationUI(object):
         self._led(canvas, x + 290, h - 45, (0, 0, 255), gpio.leds.get("red"), "ROJO")
         return canvas
 
+
+    @staticmethod
+    def _draw_calibration_overlay(view, metrics):
+        labels = {
+            "OPEN": "OJOS ABIERTOS",
+            "DROWSY": "POSIBLE SOMNOLENCIA",
+            "ASLEEP": "DORMIDO / POSTURA DE SUENO",
+        }
+        target = metrics.get("calibration_target", "")
+        progress = max(0.0, min(1.0, float(metrics.get("calibration_progress", 0.0))))
+        width = max(120, view.shape[1] - 80)
+        cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 150), (15, 15, 15), -1)
+        cv2.putText(view, "CALIBRANDO: %s" % labels.get(target, target), (40, 98),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
+        cv2.putText(view, "Mantenga la pose hasta completar la barra", (40, 124),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1)
+        cv2.rectangle(view, (40, 134), (40 + width, 145), (90, 90, 90), 1)
+        cv2.rectangle(view, (40, 134), (40 + int(width * progress), 145), (0, 220, 255), -1)
 
     @staticmethod
     def _buzzer_label(gpio):
@@ -108,6 +137,10 @@ class PresentationUI(object):
     @staticmethod
     def _fmt(value):
         return "--" if value is None else "%.1f" % value
+
+    @staticmethod
+    def _fmt3(value):
+        return "--" if value is None else "%.3f" % value
 
     @staticmethod
     def _fmt_duration(seconds):
@@ -154,8 +187,12 @@ class PresentationUI(object):
             app.set_forced_test_state("ROSTRO_NO_DETECTADO")
         elif key == ord("0"):
             app.set_forced_test_state(None)
-        elif key in (ord("c"), ord("C")):
-            app.start_calibration()
+        elif key in (ord("o"), ord("O"), ord("c"), ord("C")):
+            app.start_calibration("OPEN")
+        elif key in (ord("s"), ord("S")):
+            app.start_calibration("DROWSY")
+        elif key in (ord("d"), ord("D")):
+            app.start_calibration("ASLEEP")
         elif key in (ord("l"), ord("L")):
             self.show_landmarks = not self.show_landmarks
         elif key in (ord("i"), ord("I")):

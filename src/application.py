@@ -22,6 +22,7 @@ def default_config():
         "dlib": {"predictor_path": "models/shape_predictor_68_face_landmarks.dat", "upsample": 0, "detection_interval_frames": 5, "use_correlation_tracker": True},
         "preprocessing": {"use_clahe": True, "clahe_clip_limit": 2.0, "clahe_grid_size": 8, "use_gamma": False, "gamma": 1.0},
         "fatigue": {"ear_threshold": 0.22, "use_session_calibration": True, "blink_min_seconds": 0.08, "blink_max_seconds": 0.70, "prealert_closed_seconds": 0.45, "alert_closed_seconds": 0.85, "critical_closed_seconds": 1.6, "recovery_seconds": 1.0, "perclos_window_seconds": 60, "perclos_warning_threshold": 0.25, "perclos_alert_threshold": 0.35, "mar_threshold": 0.65, "yawn_min_seconds": 1.0, "head_nod_pitch_threshold": 18.0, "head_nod_min_seconds": 0.8, "gaze_away_warning_seconds": 2.0, "no_face_warning_seconds": 2.0},
+        "calibration": {"duration_seconds": 4.0, "min_samples": 12, "quality_threshold": 0.30, "min_ear_gap": 0.015, "max_ear_std": 0.08, "max_profile_distance": 4.0, "profile_min_confidence": 0.15, "profile_warning_seconds": 0.8, "feature_scales": {"ear": 0.04, "mar": 0.15, "pitch": 12.0, "yaw": 15.0, "roll": 15.0}},
         "gpio": {"enabled": False, "simulation_mode": True, "numbering": "BOARD"},
         "buzzer": {"enabled": True, "type": "pwm_native", "board_pin": 33, "active_high": False, "muted": False, "idle_frequency": 3000, "pwm_duty_cycle": 50, "pwm_chip": 0, "pwm_channel": 2, "min_frequency": 2000, "max_frequency": 5000},
         "leds": {"enabled": True, "active_high": True, "green_board_pin": 29, "yellow_board_pin": 31, "red_board_pin": 32},
@@ -60,9 +61,10 @@ class DrowsinessApplication(object):
         self.error = None
         self.forced_test_state = None
 
-    def start_calibration(self):
+    def start_calibration(self, profile="OPEN"):
+        self.forced_test_state = None
         self.detector.reset()
-        self.calibration.start()
+        self.calibration.start(profile)
 
     def run(self):
         exit_code = 0
@@ -122,11 +124,17 @@ class DrowsinessApplication(object):
                 continue
             analysis_started = time.monotonic()
             metrics = self.face.analyze(frame)
+            classification = self.calibration.classify(metrics)
+            metrics["calibrated_profile"] = classification["profile"]
+            metrics["calibrated_profile_confidence"] = classification["confidence"]
+            metrics["calibrated_profile_scores"] = classification["scores"]
+            metrics.update(self.calibration.status_metrics())
             last_metrics = metrics
             was_calibrating = self.calibration.active
-            calibrated = self.calibration.update(metrics)
-            if calibrated is not None:
-                self.detector.apply_calibrated_threshold(calibrated)
+            calibration_result = self.calibration.update(metrics)
+            if calibration_result is not None:
+                self.detector.apply_calibration(calibration_result)
+                metrics.update(self.calibration.status_metrics())
             if was_calibrating and not self.calibration.active:
                 self.detector.reset()
             if self.calibration.active:
@@ -158,10 +166,8 @@ class DrowsinessApplication(object):
         if frame is None:
             frame, _ = self.camera.get_latest_frame()
         if frame is not None:
-            if self.calibration.active:
-                metrics = dict(metrics)
-                metrics["calibration_progress"] = self.calibration.progress
             metrics = dict(metrics)
+            metrics.update(self.calibration.status_metrics())
             metrics.setdefault("runtime_seconds", time.monotonic() - self.started_at)
             metrics.setdefault("analysis_ms", self.analysis_ms)
             self.ui.draw(frame, metrics, self.detector, self.mode, self.gpio, self.camera.capture_fps, self.analysis_fps, self.hardware_mode())

@@ -30,7 +30,8 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - Cálculo de **EAR**, **MAR**, **PERCLOS**, mirada y pose de cabeza.
 - Detección temporal de ojos cerrados, bostezos, cabeceo y pérdida de rostro.
 - Estados escalonados: normal, prealerta, alerta y alerta crítica.
-- Calibración del umbral EAR durante la sesión.
+- Calibración supervisada de tres perfiles personales: **ojos abiertos**,
+  **posible somnolencia** y **dormido**, durante la sesión.
 - Interfaz OpenCV con métricas, landmarks, FPS y estado del hardware.
 - Modos de operación **AUTOMATIC**, **MAINTENANCE** y **EMERGENCY**.
 - Ejecución con GPIO físico o en modo completamente simulado.
@@ -257,13 +258,39 @@ python3 main.py --gpio-self-test
 | `1` | Modo automático simulado |
 | `2` | Modo mantenimiento simulado |
 | `3` | Paro de emergencia simulado |
-| `C` | Calibrar el umbral EAR con los ojos abiertos |
+| `O` | Calibrar perfil **ojos abiertos** |
+| `S` | Calibrar perfil **posible somnolencia** |
+| `D` | Calibrar perfil **dormido / ojos cerrados** |
+| `C` | Alias compatible de `O` |
 | `L` | Mostrar u ocultar landmarks |
 | `I` | Mostrar u ocultar el panel de información |
 | `M` | Silenciar o reactivar el buzzer |
 | `P` | Pausar o reanudar la visualización |
 | `R` | Reiniciar las métricas temporales |
 | `Q` / `Esc` | Cerrar la aplicación |
+
+### Calibración de los tres estados
+
+Realiza la calibración con el vehículo detenido, la cámara en su posición final
+y una iluminación similar a la de uso:
+
+1. Presiona `O` y permanece aproximadamente 4 segundos mirando al frente, con
+   los ojos abiertos y una postura normal.
+2. Presiona `S` y simula posible somnolencia durante 4 segundos: párpados
+   entrecerrados, expresión relajada y una inclinación ligera y natural.
+3. Presiona `D` y mantén durante 4 segundos los ojos cerrados y la postura de
+   cabeza que se desea reconocer como dormido.
+4. Comprueba en el panel que aparezca `O:OK S:OK D:OK`. A partir de ese
+   momento se muestran el perfil detectado, su confianza y su duración.
+
+Las muestras con baja calidad se descartan. Los valores EAR deben quedar
+separados en el orden abierto > somnoliento > dormido; si se superponen, el
+sistema rechaza el conjunto para evitar un clasificador ambiguo.
+
+**dlib no se reentrena:** continúa extrayendo los 68 landmarks. El clasificador
+de sesión combina **EAR, MAR, pitch, yaw, roll y mirada** para comparar cada
+frame con los tres perfiles personales. La calibración se mantiene en memoria,
+por lo que debe repetirse al reiniciar el programa.
 
 ---
 
@@ -391,7 +418,8 @@ reposo debe ser **HIGH**, implementado como PWM habilitado al 100 %.
 
 ### Hay falsas alertas
 
-- Calibra EAR con la tecla `C`.
+- Completa los tres perfiles con `O`, `S` y `D` hasta ver
+  `O:OK S:OK D:OK`.
 - Mejora la iluminación y el encuadre.
 - Revisa `ear_threshold`, PERCLOS y los umbrales temporales.
 

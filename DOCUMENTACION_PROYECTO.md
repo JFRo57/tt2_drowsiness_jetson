@@ -15,7 +15,9 @@ Se construyo una aplicacion modular en Python con los siguientes componentes:
 - `src/camera.py`: captura video desde camara CSI usando un pipeline GStreamer con `nvarguscamerasrc` y entrega el ultimo frame disponible en un hilo separado.
 - `src/face_analyzer.py`: usa dlib para detectar rostro y puntos faciales. Calcula EAR, MAR, pose de cabeza, direccion de mirada, brillo y calidad de deteccion.
 - `src/fatigue_detector.py`: convierte las metricas faciales en estados del sistema como `NORMAL`, `PARPADEO`, `POSIBLE_SOMNOLENCIA`, `ALERTA`, `ALERTA_CRITICA` y `ROSTRO_NO_DETECTADO`.
-- `src/calibration.py`: calibra el umbral EAR de sesion a partir de muestras con ojos abiertos.
+- `src/calibration.py`: captura tres perfiles personales de sesion (ojos
+  abiertos, posible somnolencia y dormido), calcula umbrales EAR robustos y
+  clasifica cada frame usando EAR, MAR, pose y mirada.
 - `src/alert_controller.py`: traduce estados de fatiga a patrones de LEDs y tonos PWM para buzzer pasivo.
 - `src/gpio_controller.py`: controla GPIO fisico en Jetson o modo simulado, incluyendo PWM para buzzer pasivo.
 - `src/mode_controller.py`: administra los modos `AUTOMATIC`, `MAINTENANCE` y `EMERGENCY`.
@@ -388,7 +390,10 @@ Teclas disponibles:
 - `1`: cambiar a modo automatico simulado.
 - `2`: cambiar a modo mantenimiento simulado.
 - `3`: cambiar a modo paro de emergencia simulado.
-- `C`: iniciar calibracion del umbral EAR.
+- `O`: calibrar el perfil de ojos abiertos.
+- `S`: calibrar el perfil de posible somnolencia.
+- `D`: calibrar el perfil dormido, con ojos cerrados y su postura asociada.
+- `C`: alias compatible de `O`.
 - `L`: mostrar u ocultar landmarks.
 - `I`: mostrar u ocultar panel de informacion.
 - `M`: silenciar o reactivar buzzer.
@@ -398,14 +403,34 @@ Teclas disponibles:
 
 ### Calibracion
 
-Para calibrar:
+Con el vehiculo detenido, la camara en su posicion final y luz estable:
 
-1. Sentarse frente a la camara con iluminacion estable.
-2. Presionar `C`.
-3. Mirar al frente con ojos abiertos durante aproximadamente 4 segundos.
-4. Si hay suficientes muestras estables, el sistema ajusta el umbral EAR de sesion.
+1. Presionar `O` y mirar al frente con ojos abiertos y postura normal durante
+   aproximadamente 4 segundos.
+2. Presionar `S` y representar posible somnolencia durante 4 segundos, con
+   parpados entrecerrados, expresion relajada e inclinacion ligera.
+3. Presionar `D` y mantener los ojos cerrados junto con la postura de cabeza
+   que se desea reconocer como dormida durante 4 segundos.
+4. Confirmar que el panel muestre `O:OK S:OK D:OK`. El clasificador queda
+   activo a partir del siguiente frame.
 
-Si la calibracion falla, puede deberse a rostro mal encuadrado, poca luz, exceso de movimiento o landmarks inestables.
+El panel tambien presenta:
+
+- perfil que se esta capturando y porcentaje de progreso;
+- perfiles terminados;
+- perfil detectado, confianza y tiempo sostenido;
+- umbrales EAR calculados para somnolencia y ojos cerrados.
+
+Las muestras de baja calidad no se guardan. El modelo exige una separacion EAR
+minima y el orden abierto > somnoliento > dormido; un conjunto superpuesto o
+inestable se rechaza para reducir clasificaciones ambiguas.
+
+dlib no cambia ni se reentrena durante este proceso: extrae los landmarks. El
+clasificador personal de sesion utiliza EAR, MAR, pitch, yaw, roll y mirada para
+comparar cada frame contra los tres perfiles. Los perfiles solo se mantienen en
+memoria y deben capturarse de nuevo despues de reiniciar el programa.
+
+Si falla una captura, revisar el encuadre, iluminacion, calidad del rostro,
 
 ## Configuracion principal
 
@@ -437,6 +462,18 @@ El archivo `config.json` concentra los parametros del sistema.
 - `head_nod_pitch_threshold`: umbral de cabeceo por inclinacion.
 - `gaze_away_warning_seconds`: tiempo de mirada desviada para advertencia.
 - `no_face_warning_seconds`: tiempo sin rostro para advertencia.
+
+### Calibracion
+
+- `duration_seconds`: duracion de captura de cada perfil.
+- `min_samples`: minimo de frames validos por perfil.
+- `quality_threshold`: calidad facial minima aceptada.
+- `min_ear_gap`: separacion EAR minima entre perfiles vecinos.
+- `max_ear_std`: dispersion EAR maxima permitida dentro de un perfil.
+- `max_profile_distance`: distancia maxima para aceptar una clasificacion.
+- `profile_min_confidence`: confianza minima usada por el detector temporal.
+- `profile_warning_seconds`: persistencia del perfil somnoliento antes de avisar.
+- `feature_scales`: normalizacion de EAR, MAR y angulos de pose.
 
 ### GPIO
 
@@ -677,7 +714,8 @@ Si se mueve el archivo, actualizar `dlib.predictor_path` en `config.json`.
 
 ### Muchas falsas alertas
 
-- Ejecutar calibracion con `C`.
+- Completar las calibraciones `O`, `S` y `D` hasta que el panel muestre
+  `O:OK S:OK D:OK`.
 - Ajustar `ear_threshold`.
 - Mejorar iluminacion y posicion de camara.
 - Revisar que el rostro ocupe suficiente area del frame.

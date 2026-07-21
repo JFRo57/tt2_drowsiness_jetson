@@ -11,10 +11,18 @@ class FatigueDetector(object):
 
     def __init__(self, config):
         self.config = config["fatigue"]
+        self.calibration_config = config.get("calibration", {})
         self.state = "INICIALIZANDO"
         self.previous_state = None
         self.reason = "Inicializando sistema"
         self.ear_threshold = float(self.config["ear_threshold"])
+        self.drowsy_ear_threshold = float(self.config.get("drowsy_ear_threshold", self.ear_threshold + 0.04))
+        self.profile_min_confidence = float(self.calibration_config.get("profile_min_confidence", 0.15))
+        self.profile_warning_seconds = float(self.calibration_config.get("profile_warning_seconds", 0.8))
+        self.calibrated_profile = "NO_CALIBRADO"
+        self.calibrated_profile_confidence = 0.0
+        self.calibrated_profile_since = None
+        self.calibrated_profile_seconds = 0.0
         self.closed_since = None
         self.yawn_since = None
         self.nod_since = None
@@ -33,6 +41,7 @@ class FatigueDetector(object):
 
     def reset(self):
         threshold = self.ear_threshold
+        drowsy_threshold = self.drowsy_ear_threshold
         self.state = "NORMAL"
         self.previous_state = None
         self.reason = "Metricas temporales reiniciadas"
@@ -52,9 +61,23 @@ class FatigueDetector(object):
         self.possible_nod = False
         self.gaze_away_seconds = 0.0
         self.ear_threshold = threshold
+        self.drowsy_ear_threshold = drowsy_threshold
+        self.calibrated_profile = "NO_CALIBRADO"
+        self.calibrated_profile_confidence = 0.0
+        self.calibrated_profile_since = None
+        self.calibrated_profile_seconds = 0.0
 
     def apply_calibrated_threshold(self, value):
         self.ear_threshold = float(value)
+
+    def apply_calibration(self, result):
+        thresholds = result.get("thresholds", {}) if result else {}
+        if thresholds.get("ear_threshold") is not None:
+            self.ear_threshold = float(thresholds["ear_threshold"])
+        elif result and result.get("ear_threshold") is not None:
+            self.ear_threshold = float(result["ear_threshold"])
+        if thresholds.get("drowsy_ear_threshold") is not None:
+            self.drowsy_ear_threshold = float(thresholds["drowsy_ear_threshold"])
 
     def update(self, metrics, mode="AUTOMATIC"):
         now = time.monotonic()
@@ -70,6 +93,10 @@ class FatigueDetector(object):
             metrics["no_face_seconds"] = no_face_time
             self.closed_since = None
             self.closed_duration = 0.0
+            self.calibrated_profile = "DESCONOCIDO"
+            self.calibrated_profile_confidence = 0.0
+            self.calibrated_profile_since = None
+            self.calibrated_profile_seconds = 0.0
             if no_face_time >= float(self.config["no_face_warning_seconds"]):
                 return self._set("ROSTRO_NO_DETECTADO", "Rostro no detectado por %.1f s" % no_face_time, now)
             return self._set("NORMAL", "Perdida momentanea de rostro", now)
@@ -81,6 +108,7 @@ class FatigueDetector(object):
         closed = reliable and ear < self.ear_threshold
         self._update_perclos(now, bool(closed and reliable))
         self._update_eye_timing(now, closed, reliable)
+        self._update_calibrated_profile(now, metrics)
         self._update_yawn(now, metrics)
         self._update_head(now, metrics)
         self._update_gaze(now, metrics)
@@ -94,6 +122,10 @@ class FatigueDetector(object):
             "recent_yawns": len(self.yawns),
             "possible_nod": self.possible_nod,
             "gaze_away_seconds": self.gaze_away_seconds,
+            "calibrated_profile": self.calibrated_profile,
+            "calibrated_profile_confidence": self.calibrated_profile_confidence,
+            "calibrated_profile_seconds": self.calibrated_profile_seconds,
+            "drowsy_ear_threshold": self.drowsy_ear_threshold,
         })
         return self._decide(now, metrics, closed, reliable)
 
@@ -151,6 +183,21 @@ class FatigueDetector(object):
         while self.yawns and now - self.yawns[0] > 180.0:
             self.yawns.popleft()
 
+    def _update_calibrated_profile(self, now, metrics):
+        profile = metrics.get("calibrated_profile", "NO_CALIBRADO")
+        confidence = float(metrics.get("calibrated_profile_confidence", 0.0))
+        if profile not in ("OPEN", "DROWSY", "ASLEEP") or confidence < self.profile_min_confidence:
+            self.calibrated_profile = profile if profile in ("NO_CALIBRADO", "DESCONOCIDO") else "DESCONOCIDO"
+            self.calibrated_profile_confidence = confidence
+            self.calibrated_profile_since = None
+            self.calibrated_profile_seconds = 0.0
+            return
+        if profile != self.calibrated_profile or self.calibrated_profile_since is None:
+            self.calibrated_profile_since = now
+        self.calibrated_profile = profile
+        self.calibrated_profile_confidence = confidence
+        self.calibrated_profile_seconds = max(0.0, now - self.calibrated_profile_since)
+
     def _update_head(self, now, metrics):
         pitch = metrics.get("pitch")
         active = pitch is not None and abs(float(pitch)) >= float(self.config["head_nod_pitch_threshold"])
@@ -185,6 +232,15 @@ class FatigueDetector(object):
             return self._set("ALERTA", "Cierre ocular prolongado: %.1f s" % cd, now)
         if cd >= float(self.config["prealert_closed_seconds"]):
             return self._set("POSIBLE_SOMNOLENCIA", "Cierre ocular sostenido: %.1f s" % cd, now)
+        if self.calibrated_profile == "ASLEEP":
+            if self.calibrated_profile_seconds >= float(self.config["critical_closed_seconds"]):
+                return self._set("ALERTA_CRITICA", "Perfil dormido sostenido: %.1f s" % self.calibrated_profile_seconds, now)
+            if self.calibrated_profile_seconds >= float(self.config["alert_closed_seconds"]):
+                return self._set("ALERTA", "Perfil dormido: %.1f s" % self.calibrated_profile_seconds, now)
+            if self.calibrated_profile_seconds >= float(self.config["prealert_closed_seconds"]):
+                return self._set("POSIBLE_SOMNOLENCIA", "Transicion a perfil dormido", now)
+        if self.calibrated_profile == "DROWSY" and self.calibrated_profile_seconds >= self.profile_warning_seconds:
+            return self._set("POSIBLE_SOMNOLENCIA", "Perfil calibrado de somnolencia: %.1f s" % self.calibrated_profile_seconds, now)
         if perclos >= float(self.config["perclos_alert_threshold"]):
             return self._set("ALERTA", "PERCLOS elevado: %.0f%%" % (perclos * 100.0), now)
         if perclos >= float(self.config["perclos_warning_threshold"]):
