@@ -112,6 +112,7 @@ flowchart TD
 ## Estados principales
 
 - `NORMAL`: indicadores dentro de rango.
+- `CALIBRANDO`: captura supervisada de uno de los perfiles O, S o D.
 - `PARPADEO`: cierre ocular breve dentro del rango esperado de parpadeo.
 - `POSIBLE_SOMNOLENCIA`: advertencia preventiva por cierre sostenido, PERCLOS alto, bostezo con evidencia secundaria, cabeceo o mirada desviada.
 - `ALERTA`: cierre ocular prolongado o PERCLOS de alerta.
@@ -120,6 +121,72 @@ flowchart TD
 - `MANTENIMIENTO`: modo de mantenimiento, con alerta auditiva suspendida.
 - `PARO_EMERGENCIA`: modo de paro de emergencia.
 - `ERROR`: fallo no recuperable durante ejecucion.
+
+### Diagrama de la maquina de estados
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "INICIALIZANDO" as INIT
+    state "MANTENIMIENTO" as MAINT
+    state "PARO_EMERGENCIA" as STOP
+    state "ERROR" as ERROR
+
+    [*] --> INIT
+    INIT --> AUTO: inicio correcto
+    INIT --> ERROR: excepcion
+
+    state "MODO AUTOMATICO" as AUTO {
+        [*] --> EVAL
+        state "Evaluar frame por prioridad" as EVAL
+        state EVAL <<choice>>
+        state "CALIBRANDO" as CAL
+        state "ROSTRO_NO_DETECTADO" as NOFACE
+        state "PARPADEO" as BLINK
+        state "ALERTA_CRITICA" as CRITICAL
+        state "ALERTA" as ALERT
+        state "POSIBLE_SOMNOLENCIA" as POSSIBLE
+        state "NORMAL" as NORMAL
+
+        EVAL --> CAL: tecla O, S o D
+        CAL --> EVAL: captura terminada (valida o invalida)
+
+        EVAL --> NOFACE: sin rostro >= 2.0 s
+        EVAL --> BLINK: ojos cerrados < 0.45 s
+        EVAL --> CRITICAL: cierre o ASLEEP >= 1.60 s
+        EVAL --> ALERT: cierre o ASLEEP >= 0.85 s<br/>o PERCLOS >= 0.35
+        EVAL --> POSSIBLE: cierre o ASLEEP >= 0.45 s<br/>DROWSY >= 0.80 s<br/>PERCLOS >= 0.25<br/>bostezo, cabeceo o mirada desviada
+        EVAL --> NORMAL: indicadores dentro de rango<br/>o perdida de rostro < 2.0 s
+
+        NOFACE --> EVAL: siguiente frame
+        BLINK --> EVAL: siguiente frame
+        CRITICAL --> EVAL: siguiente frame
+        ALERT --> EVAL: siguiente frame
+        POSSIBLE --> EVAL: siguiente frame
+        NORMAL --> EVAL: siguiente frame
+    }
+
+    AUTO --> MAINT: mode = MAINTENANCE
+    MAINT --> AUTO: mode = AUTOMATIC
+    AUTO --> STOP: mode = EMERGENCY
+    MAINT --> STOP: mode = EMERGENCY
+    STOP --> AUTO: mode = AUTOMATIC
+    STOP --> MAINT: mode = MAINTENANCE
+
+    AUTO --> ERROR: fallo no recuperable
+    MAINT --> ERROR: fallo no recuperable
+    STOP --> ERROR: fallo no recuperable
+    ERROR --> [*]: cleanup
+```
+
+En el diagrama, `EVAL` no es un estado visible de la interfaz; representa la
+decision ejecutada en cada frame. Las condiciones se comprueban en el orden
+implementado por `FatigueDetector`: modo, presencia del rostro, parpadeo,
+cierre critico, alerta, posible somnolencia, PERCLOS, evidencias secundarias,
+recuperacion y finalmente `NORMAL`. Debido a esta reevaluacion, un estado puede
+saltar directamente a otro si las metricas del frame ya cumplen una condicion
+de mayor prioridad.
+
 
 ## Modos de operacion
 
