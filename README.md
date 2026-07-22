@@ -1,18 +1,19 @@
-# TT2 Drowsiness Jetson
+# TT2 Drowsiness Jetson V3
 
-> **Detección de somnolencia en tiempo real para NVIDIA Jetson Nano, con visión artificial y alertas físicas mediante GPIO.**
+> **Detección de somnolencia optimizada para NVIDIA Jetson Nano, con calibración personal, interfaz en tiempo real y alertas GPIO.**
 
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![NVIDIA Jetson Nano](https://img.shields.io/badge/NVIDIA-Jetson%20Nano-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/embedded/jetson-nano)
 [![OpenCV](https://img.shields.io/badge/OpenCV-GStreamer-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
 [![dlib](https://img.shields.io/badge/dlib-68%20landmarks-0080FF)](http://dlib.net/)
+[![CUDA](https://img.shields.io/badge/CUDA-10.2-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![GPIO](https://img.shields.io/badge/GPIO-PWM2-orange)](https://github.com/NVIDIA/jetson-gpio)
 
 ---
 
 ## 📌 Descripción general
 
-**TT2 Drowsiness Jetson** es un sistema embebido para detectar señales de
+**TT2 Drowsiness Jetson V3** es un sistema embebido para detectar señales de
 somnolencia y distracción mediante una cámara CSI. Procesa video en tiempo real,
 localiza el rostro y sus 68 puntos faciales, calcula métricas como **EAR**,
 **MAR**, **PERCLOS**, pose de cabeza y dirección de mirada, y clasifica el nivel
@@ -25,8 +26,11 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 
 ### Características principales
 
-- Captura de cámara CSI mediante **GStreamer** y `nvarguscamerasrc`.
-- Detección facial y estimación de **68 landmarks** con dlib.
+- Captura CSI por **NVMM/nvarguscamerasrc**, escalado con `nvvidconv` y salida
+  **BGRx directa**, sin `videoconvert` en CPU.
+- Detección facial primaria con **dlib CNN sobre CUDA**.
+- Respaldos automáticos con **OpenCV DNN CUDA FP16** y **dlib HOG CPU**.
+- Estimación de **68 landmarks** con dlib, conservando la calibración original.
 - Cálculo de **EAR**, **MAR**, **PERCLOS**, mirada y pose de cabeza.
 - Detección temporal de ojos cerrados, bostezos, cabeceo y pérdida de rostro.
 - Estados escalonados: normal, prealerta, alerta y alerta crítica.
@@ -37,8 +41,15 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - Ejecución con GPIO físico o en modo completamente simulado.
 - Alertas con LEDs y buzzer pasivo **MH-FMD/YL-44 low-level trigger**.
 - PWM2 nativo para mantener el tono estable bajo carga de OpenCV y dlib.
+- Pipeline **latest-only**: nunca procesa dos veces el mismo cuadro ni acumula
+  video atrasado.
+- Detección facial a media escala, seguimiento ligero por landmarks y
+  redetección periódica.
+- CLAHE adaptativo, pose/mirada desacopladas y PERCLOS incremental.
+- Objetivo de análisis configurable de **20 FPS** y telemetría por etapa en la
+  interfaz.
 - Registro opcional de transiciones de estado en CSV.
-- Pruebas unitarias para el controlador GPIO/PWM.
+- Pruebas unitarias de calibración, estados, GPIO/PWM y ruta optimizada.
 
 ---
 
@@ -47,9 +58,9 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 | Categoría | Tecnología |
 | :--- | :--- |
 | **Backend / Core** | Python 3 |
-| **Visión artificial** | OpenCV, dlib, NumPy |
-| **Captura de video** | Cámara CSI, GStreamer, `nvarguscamerasrc` |
-| **Hardware** | NVIDIA Jetson Nano 4 GB, Jetson.GPIO, GPIO BOARD, PWM2 |
+| **Visión artificial** | OpenCV CUDA/DNN FP16, dlib CUDA/CNN, 68 landmarks, NumPy |
+| **Captura de video** | Cámara CSI, NVMM, GStreamer, `nvarguscamerasrc`, `nvvidconv` |
+| **Hardware** | NVIDIA Jetson Nano 4 GB, GPU Tegra X1, Jetson.GPIO, GPIO BOARD, PWM2 |
 | **Interfaz** | Ventanas y overlays de OpenCV |
 | **Servicios del sistema** | systemd, shell POSIX, sysfs PWM |
 | **Pruebas** | `unittest`, `py_compile`, validación JSON |
@@ -60,9 +71,13 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 
 ```mermaid
 flowchart LR
-    CAM[Cámara CSI] --> GST[GStreamer]
-    GST --> APP[DrowsinessApplication]
-    APP --> FACE[OpenCV + dlib]
+    CAM[Cámara CSI] --> GST[NVMM + nvvidconv]
+    GST --> BGRX[BGRx 640x360]
+    BGRX --> APP[DrowsinessApplication]
+    APP --> GPU[dlib CNN CUDA]
+    GPU --> FACE[dlib 68 landmarks]
+    GPU -. fallo .-> FALLBACK[OpenCV CUDA FP16 / HOG CPU]
+    FALLBACK --> FACE
     FACE --> FATIGUE[FatigueDetector]
     FATIGUE --> ALERT[AlertController]
     SWITCH[Switch de 3 estados] --> GPIO[GPIOController]
@@ -75,6 +90,49 @@ flowchart LR
 
 La descripción detallada de módulos, estados y flujo de ejecución se encuentra
 en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
+
+---
+
+## ⚡ Rendimiento de la V3
+
+La optimización conserva el predictor dlib de 68 puntos y todo el hardware de
+la versión base. El trabajo se reduce en los lugares de mayor costo:
+
+- Captura en hilo independiente con espera por secuencia y acceso sin copia.
+- Salida BGRx directa desde `nvvidconv`; la conversión a BGR ocurre únicamente
+  al dibujar la interfaz y no existe en modo headless.
+- Detección CUDA a escala `0.5`, cada 3 análisis durante búsqueda y cada 12 con
+  un rostro seguido, con cambio automático a un backend de respaldo si falla.
+- Seguimiento del ROI mediante landmarks entre redetecciones.
+- Pose y mirada cada 2 análisis, reutilizando el último valor válido.
+- CLAHE únicamente cuando la luminosidad sale del rango configurado.
+- Escrituras LED agrupadas, panel gráfico reutilizable y PERCLOS incremental.
+
+Benchmark realizado en esta Jetson Nano, cámara CSI a procesamiento
+**640×360**, escena sin rostro:
+
+| Métrica | V2 | V3 acelerada | Cambio |
+| :--- | ---: | ---: | ---: |
+| FPS del analizador | 29.328 | 29.189 | **límite de cámara (~30 FPS)** |
+| Latencia media | 11.267 ms | 10.526 ms | **−6.6 %** |
+| Latencia p95 | 33.328 ms | 29.841 ms | **−10.5 %** |
+
+Microbenchmark del detector, a media escala y sobre la misma Nano:
+
+| Backend | Latencia media | Rendimiento equivalente |
+| :--- | ---: | ---: |
+| **dlib CNN CUDA** | **27.911 ms** | **35.828 FPS** |
+| dlib HOG CPU | 30.578 ms | 32.704 FPS |
+| OpenCV DNN CUDA FP16 | 36.850 ms | 27.137 FPS |
+| OpenCV DNN CPU | 206.561 ms | 4.841 FPS |
+
+La aplicación limita deliberadamente el análisis a **20 FPS** para reservar
+CPU a la interfaz y a GPIO. Los resultados dependen de iluminación, presencia
+del rostro, temperatura y modo de energía. Para repetir la medición:
+
+```bash
+python3 scripts/benchmark_pipeline.py --seconds 10 --warmup 2
+```
 
 ---
 
@@ -92,10 +150,11 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 
 - **JetPack / L4T** instalado y funcional.
 - **Python 3**.
-- OpenCV compilado con soporte para **GStreamer**.
-- **dlib** y **NumPy**.
+- OpenCV compilado con **GStreamer, CUDA y cuDNN**.
+- **dlib con CUDA**, **NumPy** y el runtime CUDA de JetPack.
 - **Jetson.GPIO** para utilizar el hardware físico.
-- `wget` y `bzip2` para descargar el predictor facial.
+- `wget`, `bzip2` y `sha256sum` para instalar y verificar modelos.
+- Modo de energía **MAXN** recomendado para benchmarks sostenidos.
 
 > [!IMPORTANT]
 > `requirements.txt` está vacío actualmente. En Jetson se recomienda conservar
@@ -107,8 +166,8 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 1. **Clonar el repositorio:**
 
    ```bash
-   git clone https://github.com/JFRo57/tt2_drowsiness_jetson.git
-   cd tt2_drowsiness_jetson
+   git clone --branch v3 https://github.com/JFRo57/tt2_drowsiness_jetson.git tt2_drowsiness_jetson_v3
+   cd tt2_drowsiness_jetson_v3
    ```
 
 2. **Crear un entorno virtual reutilizando los paquetes de JetPack:**
@@ -125,23 +184,27 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
    python3 -c "import Jetson.GPIO as GPIO; print('Jetson.GPIO:', GPIO.VERSION)"
    ```
 
-4. **Descargar el predictor de 68 landmarks:**
+4. **Instalar y verificar los modelos:**
 
    ```bash
-   mkdir -p models
-   wget https://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2 -P models
-   bzip2 -d models/shape_predictor_68_face_landmarks.dat.bz2
+   ./scripts/setup_v3_models.sh
    ```
 
-   El archivo `models/shape_predictor_68_face_landmarks.dat` ocupa
-   aproximadamente **96 MB** y se excluye del repositorio mediante `.gitignore`.
+   El script descarga el predictor de 68 landmarks, el detector CNN de dlib y
+   los archivos del respaldo OpenCV DNN FP16. Verifica SHA-256 y los deja en
+   `models/`, excluido de Git.
 
-5. **Comprobar el modelo y ejecutar una prueba en simulación:**
+5. **Verificar aceleración y ejecutar:**
 
    ```bash
-   test -f models/shape_predictor_68_face_landmarks.dat
+   python3 -c "import cv2,dlib; print('OpenCV CUDA:', cv2.cuda.getCudaEnabledDeviceCount()); print('dlib CUDA:', dlib.DLIB_USE_CUDA, dlib.cuda.get_num_devices())"
+   python3 scripts/benchmark_accelerators.py
    python3 main.py --presentation --simulation
    ```
+
+   En esta Nano, `auto` debe seleccionar `dlib_cnn_cuda`. Si CUDA o un modelo
+   no están disponibles, el programa informa el motivo en el panel y continúa
+   con `opencv_cuda_fp16` o `dlib_hog`.
 
 ---
 
@@ -217,6 +280,13 @@ sonando. Por ello no debe utilizarse sobre BOARD 33 con este buzzer.
 
 ## ▶️ Ejecución
 
+Activa siempre el entorno virtual independiente de esta versión:
+
+```bash
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
+source .venv/bin/activate
+```
+
 ### Interfaz con hardware simulado
 
 ```bash
@@ -227,6 +297,12 @@ python3 main.py --presentation --simulation
 
 ```bash
 python3 main.py --headless --simulation
+```
+
+### Ejecución headless con GPIO físico
+
+```bash
+python3 main.py --headless
 ```
 
 ### Interfaz con GPIO físico
@@ -299,6 +375,22 @@ por lo que debe repetirse al reiniciar el programa.
 El archivo [config.json](config.json) centraliza la configuración de cámara,
 dlib, fatiga, GPIO, buzzer, LEDs, switch, interfaz y logging.
 
+La selección acelerada predeterminada es:
+
+```json
+{
+  "face_detection": {
+    "backend": "auto",
+    "backend_order": ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"],
+    "allow_fallback": true
+  }
+}
+```
+
+El panel muestra el backend realmente activo y la causa de cualquier fallback.
+Para una prueba comparativa puede forzarse uno de los tres nombres en
+`face_detection.backend`.
+
 Para habilitar hardware real:
 
 ```json
@@ -351,29 +443,40 @@ python3 -m unittest discover -s tests -v
 Valida sintaxis Python y configuración JSON:
 
 ```bash
-python3 -m py_compile main.py src/*.py tests/*.py
+python3 -m py_compile main.py src/*.py scripts/*.py tests/*.py
 python3 -m json.tool config.json >/dev/null
 ```
 
 Las pruebas GPIO unitarias utilizan un sysfs temporal y no activan el buzzer
 físico. Para validar el hardware utiliza `--gpio-self-test`.
 
+Para medir exclusivamente cámara y visión, sin interfaz ni GPIO:
+
+```bash
+python3 scripts/benchmark_pipeline.py --seconds 15
+python3 scripts/benchmark_accelerators.py
+```
+
 ---
 
 ## 📁 Estructura del proyecto
 
 ```text
-tt2_drowsiness_jetson/
+tt2_drowsiness_jetson_v3/
 ├── main.py                         # Punto de entrada y argumentos CLI
 ├── config.json                     # Configuración principal
 ├── DOCUMENTACION_PROYECTO.md       # Documentación técnica completa
-├── models/                         # Predictor dlib local, no versionado
+├── models/                         # Modelos locales verificados, no versionados
 ├── scripts/
+│   ├── setup_v3_models.sh          # Descarga y verifica los modelos
+│   ├── benchmark_accelerators.py   # Compara CPU, CUDA y FP16
+│   ├── benchmark_pipeline.py       # Benchmark reproducible cámara + visión
 │   └── configure_pwm2_jetson_nano.sh
 ├── src/
 │   ├── application.py              # Orquestación de la aplicación
 │   ├── camera.py                   # Captura CSI con GStreamer
 │   ├── face_analyzer.py            # Rostro, landmarks y métricas
+│   ├── face_detector.py            # Backend CUDA con fallback automático
 │   ├── fatigue_detector.py         # Máquina de estados de fatiga
 │   ├── alert_controller.py         # Patrones visuales y auditivos
 │   ├── gpio_controller.py          # GPIO, PWM nativo y simulación
@@ -383,7 +486,9 @@ tt2_drowsiness_jetson/
 ├── systemd/
 │   └── tt2-pwm2-pinmux.service
 └── tests/
-    └── test_gpio_controller.py
+    ├── test_calibration.py
+    ├── test_gpio_controller.py
+    └── test_performance.py
 ```
 
 ---
@@ -403,7 +508,20 @@ tt2_drowsiness_jetson/
 ls -lh models/shape_predictor_68_face_landmarks.dat
 ```
 
-Si cambias su ubicación, actualiza `dlib.predictor_path` en `config.json`.
+Ejecuta `./scripts/setup_v3_models.sh` para recuperar y verificar todos los
+modelos. Si cambias su ubicación, actualiza las rutas en `config.json`.
+
+### El panel muestra `dlib_hog` o un fallback
+
+Comprueba primero:
+
+```bash
+python3 -c "import cv2,dlib; print(cv2.cuda.getCudaEnabledDeviceCount(), dlib.DLIB_USE_CUDA, dlib.cuda.get_num_devices())"
+python3 scripts/benchmark_accelerators.py
+```
+
+El motivo exacto queda en `Fallback vision`. El backend HOG mantiene el sistema
+operativo, pero indica que CUDA, cuDNN o un modelo no están disponibles.
 
 ### El buzzer solo hace “tic”
 

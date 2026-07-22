@@ -14,6 +14,8 @@ class PresentationUI(object):
         self.drawn_once = False
         self.ever_visible = False
         self.closed_checks = 0
+        self._panel_canvas = None
+        self._panel_shape = None
 
     def create(self):
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
@@ -24,7 +26,7 @@ class PresentationUI(object):
         self.created = True
 
     def draw(self, frame, metrics, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
-        view = frame.copy()
+        view = self._display_frame(frame)
         if metrics.get("face_detected"):
             x1, y1, x2, y2 = metrics["rect"]
             cv2.rectangle(view, (x1, y1), (x2, y2), (40, 220, 40), 2)
@@ -49,10 +51,22 @@ class PresentationUI(object):
         cv2.imshow(self.window, view)
         self.drawn_once = True
 
+    @staticmethod
+    def _display_frame(frame):
+        """Convert BGRx only when a three-channel image is needed by the UI."""
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame.copy()
+
     def _add_panel(self, frame, m, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
-        panel_w = 430
-        h = max(frame.shape[0], 880)
-        canvas = np.zeros((h, frame.shape[1] + panel_w, 3), dtype=np.uint8)
+        panel_w = 460
+        h = max(frame.shape[0], 970)
+        shape = (h, frame.shape[1] + panel_w, 3)
+        if self._panel_canvas is None or self._panel_shape != shape:
+            self._panel_canvas = np.empty(shape, dtype=np.uint8)
+            self._panel_shape = shape
+        canvas = self._panel_canvas
+        canvas.fill(0)
         canvas[:frame.shape[0], :frame.shape[1]] = frame
         x = frame.shape[1] + 15
         y = 25
@@ -60,6 +74,12 @@ class PresentationUI(object):
             "Detector de somnolencia para conductores",
             "NVIDIA Jetson Nano 4 GB",
             "Camara IMX219-77IR",
+            "Detector facial: %s (%s)" % (
+                m.get("face_detector_backend", "--"),
+                "GPU" if m.get("face_detector_accelerated") else "CPU",
+            ),
+            "Fallback vision: %s" % (
+                m.get("face_detector_fallback", "ninguno")[:38] or "ninguno"),
             "Modo: %s (%s)" % (mode_controller.mode, mode_controller.source),
             "Estado: %s" % detector.state,
             "Motivo: %s" % detector.reason[:38],
@@ -85,8 +105,19 @@ class PresentationUI(object):
             "Luminosidad media: %.1f" % m.get("brightness", 0.0),
             "Buzzer: %s" % (self._buzzer_label(gpio)),
             "Tiempo ejecucion: %s" % self._fmt_duration(m.get("runtime_seconds", 0.0)),
-            "FPS captura/analisis: %.1f / %.1f" % (capture_fps, analysis_fps),
+            "FPS captura/analisis/objetivo: %.1f / %.1f / %.1f" % (
+                capture_fps,
+                analysis_fps,
+                m.get("target_analysis_fps", 0.0),
+            ),
             "Tiempo analisis/frame: %.1f ms" % m.get("analysis_ms", 0.0),
+            "Antiguedad del cuadro: %.1f ms" % m.get("frame_age_ms", 0.0),
+            "Ruta de vision: %s" % m.get("analysis_source", "--"),
+            "Etapas pre/loc/lm/feat: %s" % self._analysis_stages(m),
+            "Saltados analisis/captura: %d / %d" % (
+                m.get("analysis_skipped_frames", 0),
+                m.get("capture_dropped_frames", 0),
+            ),
             "Velocidad deteccion: %s" % self._speed_label(analysis_fps),
             "Hardware: %s" % hardware_mode,
             "GPIO error: %s" % (gpio.error[:36] if gpio.error else "ninguno"),
@@ -141,6 +172,16 @@ class PresentationUI(object):
     @staticmethod
     def _fmt3(value):
         return "--" if value is None else "%.3f" % value
+
+    @staticmethod
+    def _analysis_stages(metrics):
+        stages = metrics.get("analysis_breakdown_ms", {})
+        return "%.1f/%.1f/%.1f/%.1f ms" % (
+            stages.get("preprocess", 0.0),
+            stages.get("locate", 0.0),
+            stages.get("landmarks", 0.0),
+            stages.get("features", 0.0),
+        )
 
     @staticmethod
     def _fmt_duration(seconds):
