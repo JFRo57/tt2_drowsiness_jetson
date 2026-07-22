@@ -9,6 +9,7 @@
     "display_height": 620,
     "fps": 30,
     "flip_method": 2,
+    "output_format": "BGRx",
     "reconnect_attempts": 3
   },
   "dlib": {
@@ -22,6 +23,20 @@
     "tracker_quality_threshold": 6.5,
     "pose_interval_frames": 2,
     "gaze_interval_frames": 2
+  },
+  "face_detection": {
+    "backend": "auto",
+    "backend_order": [
+      "dlib_cnn_cuda",
+      "opencv_cuda_fp16",
+      "dlib_hog"
+    ],
+    "allow_fallback": true,
+    "warmup": true,
+    "confidence_threshold": 0.55,
+    "dlib_cnn_model_path": "models/mmod_human_face_detector.dat",
+    "opencv_config_path": "models/deploy.prototxt",
+    "opencv_model_path": "models/res10_300x300_ssd_iter_140000_fp16.caffemodel"
   },
   "preprocessing": {
     "use_clahe": true,

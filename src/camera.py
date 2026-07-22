@@ -21,14 +21,19 @@ class CameraManager(object):
 
     def build_pipeline(self):
         c = self.config
+        output_format = str(c.get("output_format", "BGRx")).upper()
+        if output_format == "BGRX":
+            conversion = ""
+        elif output_format == "BGR":
+            conversion = "videoconvert ! video/x-raw, format=(string)BGR ! "
+        else:
+            raise ValueError("camera.output_format debe ser BGRx o BGR")
         return (
             "nvarguscamerasrc sensor-id=%d ! "
             "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, "
             "format=(string)NV12, framerate=(fraction)%d/1 ! "
             "nvvidconv flip-method=%d ! "
-            "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
-            "videoconvert ! "
-            "video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
+            "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! %sappsink drop=true max-buffers=1 sync=false"
             % (
                 int(c["sensor_id"]),
                 int(c["capture_width"]),
@@ -37,6 +42,7 @@ class CameraManager(object):
                 int(c["flip_method"]),
                 int(c["processing_width"]),
                 int(c["processing_height"]),
+                conversion,
             )
         )
 

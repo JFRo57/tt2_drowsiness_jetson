@@ -18,8 +18,9 @@ from .shutdown_manager import ShutdownManager
 
 def default_config():
     return {
-        "camera": {"sensor_id": 0, "capture_width": 1280, "capture_height": 720, "processing_width": 640, "processing_height": 360, "display_width": 1100, "display_height": 620, "fps": 30, "flip_method": 2, "reconnect_attempts": 3},
+        "camera": {"sensor_id": 0, "capture_width": 1280, "capture_height": 720, "processing_width": 640, "processing_height": 360, "display_width": 1100, "display_height": 620, "fps": 30, "flip_method": 2, "output_format": "BGRx", "reconnect_attempts": 3},
         "dlib": {"predictor_path": "models/shape_predictor_68_face_landmarks.dat", "upsample": 0, "detection_interval_frames": 12, "no_face_detection_interval_frames": 3, "detector_scale": 0.5, "tracking_mode": "landmarks", "use_correlation_tracker": False, "tracker_quality_threshold": 6.5, "pose_interval_frames": 2, "gaze_interval_frames": 2},
+        "face_detection": {"backend": "auto", "backend_order": ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"], "allow_fallback": True, "warmup": True, "confidence_threshold": 0.55, "dlib_cnn_model_path": "models/mmod_human_face_detector.dat", "opencv_config_path": "models/deploy.prototxt", "opencv_model_path": "models/res10_300x300_ssd_iter_140000_fp16.caffemodel"},
         "preprocessing": {"use_clahe": True, "adaptive_clahe": True, "clahe_dark_threshold": 75.0, "clahe_bright_threshold": 205.0, "clahe_clip_limit": 2.0, "clahe_grid_size": 8, "use_gamma": False, "gamma": 1.0},
         "performance": {"target_analysis_fps": 20.0, "frame_wait_timeout_seconds": 0.1, "opencv_threads": 2, "opencv_optimized": True},
         "fatigue": {"ear_threshold": 0.22, "use_session_calibration": True, "blink_min_seconds": 0.08, "blink_max_seconds": 0.70, "prealert_closed_seconds": 0.45, "alert_closed_seconds": 0.85, "critical_closed_seconds": 1.6, "recovery_seconds": 1.0, "perclos_window_seconds": 60, "perclos_warning_threshold": 0.25, "perclos_alert_threshold": 0.35, "mar_threshold": 0.65, "yawn_min_seconds": 1.0, "head_nod_pitch_threshold": 18.0, "head_nod_min_seconds": 0.8, "gaze_away_warning_seconds": 2.0, "no_face_warning_seconds": 2.0},

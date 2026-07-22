@@ -12,8 +12,11 @@ Se construyo una aplicacion modular en Python con los siguientes componentes:
 
 - `main.py`: punto de entrada. Carga `config.json`, procesa argumentos de linea de comandos y arranca la aplicacion.
 - `src/application.py`: orquesta camara, analisis facial, detector de fatiga, UI, GPIO, logging y cierre limpio.
-- `src/camera.py`: captura video desde camara CSI usando un pipeline GStreamer con `nvarguscamerasrc` y entrega el ultimo frame disponible en un hilo separado.
-- `src/face_analyzer.py`: usa dlib para detectar rostro y puntos faciales. Calcula EAR, MAR, pose de cabeza, direccion de mirada, brillo y calidad de deteccion.
+- `src/camera.py`: captura CSI con `nvarguscamerasrc`, NVMM y `nvvidconv`;
+  entrega BGRx directo y publica el ultimo frame desde un hilo separado.
+- `src/face_detector.py`: selecciona dlib CNN CUDA, OpenCV DNN CUDA FP16 o
+  dlib HOG CPU, con fallback automatico y telemetria del backend activo.
+- `src/face_analyzer.py`: estima 68 puntos faciales y calcula EAR, MAR, pose de cabeza, direccion de mirada, brillo y calidad de deteccion.
 - `src/fatigue_detector.py`: convierte las metricas faciales en estados del sistema como `NORMAL`, `PARPADEO`, `POSIBLE_SOMNOLENCIA`, `ALERTA`, `ALERTA_CRITICA` y `ROSTRO_NO_DETECTADO`.
 - `src/calibration.py`: captura tres perfiles personales de sesion (ojos
   abiertos, posible somnolencia y dormido), calcula umbrales EAR robustos y
@@ -25,7 +28,10 @@ Se construyo una aplicacion modular en Python con los siguientes componentes:
 - `src/event_logger.py`: registra transiciones de estado en CSV cuando el logging esta habilitado.
 - `src/shutdown_manager.py`: maneja cierre por `Ctrl+C`, `SIGTERM`, tecla de salida o cierre de ventana.
 
-Tambien se incluye el modelo `models/shape_predictor_68_face_landmarks.dat`, necesario para estimar los puntos faciales.
+Los modelos se instalan localmente con `scripts/setup_v3_models.sh`: predictor
+de 68 landmarks, detector CNN de dlib y SSD Caffe FP16 para el respaldo de
+OpenCV. El script verifica sus hashes SHA-256 y `models/` se mantiene fuera de
+Git.
 
 ## Cambios recientes incorporados
 
@@ -42,7 +48,11 @@ Los ultimos cambios del proyecto quedaron concentrados principalmente en la logi
 - Se agrego medicion separada de FPS de captura y FPS de analisis.
 - Se agrego periodo de recuperacion despues de alertas mediante `recovery_seconds`.
 - Se agrego deteccion temporal de parpadeos, bostezos, cabeceo, mirada desviada y rostro no detectado.
-- La configuracion base en `src/application.py` y `config.json` ya incluye secciones para camara, dlib, preprocesamiento, fatiga, GPIO, buzzer, LEDs, switch, interfaz y logging.
+- La captura entrega BGRx directamente desde `nvvidconv`, eliminando
+  `videoconvert` del camino CPU.
+- La deteccion facial usa GPU CUDA y cambia automaticamente a un respaldo si
+  el backend preferido no puede arrancar o falla durante la ejecucion.
+- La interfaz muestra backend activo, aceleracion GPU y causa del fallback.
 
 Nota: `switch.debounce_ms` y `switch.center_mode` ya existen en `config.json`. En la implementacion actual la lectura del switch usa entradas con pull-up/pull-down de Jetson.GPIO, pero no aplica una rutina de debounce por software; la posicion central se interpreta como `MAINTENANCE`, que coincide con el valor configurado actualmente.
 
@@ -50,10 +60,14 @@ Nota: `switch.debounce_ms` y `switch.center_mode` ya existen en `config.json`. E
 
 ```mermaid
 flowchart LR
-    CAM[Camara CSI IMX219-77IR] --> GStreamer[nvarguscamerasrc + GStreamer]
-    GStreamer --> CameraManager[CameraManager]
+    CAM[Camara CSI IMX219-77IR] --> GStreamer[NVMM + nvarguscamerasrc + nvvidconv]
+    GStreamer --> BGRX[BGRx 640x360]
+    BGRX --> CameraManager[CameraManager latest-only]
     CameraManager --> App[DrowsinessApplication]
-    App --> FaceAnalyzer[FaceAnalyzer dlib + OpenCV]
+    App --> Backend[dlib CNN CUDA]
+    Backend --> FaceAnalyzer[FaceAnalyzer 68 landmarks]
+    Backend -. fallback .-> Reserva[OpenCV CUDA FP16 o HOG CPU]
+    Reserva --> FaceAnalyzer
     FaceAnalyzer --> FatigueDetector[FatigueDetector]
     Switch[Switch 3 estados] --> GPIOController[GPIOController]
     GPIOController --> ModeController[ModeController]
@@ -72,7 +86,7 @@ flowchart LR
 flowchart TD
     A[Inicio main.py] --> B[Cargar default_config y config.json]
     B --> C[Aplicar argumentos presentation headless simulation]
-    C --> D[Inicializar GPIO logger camara UI dlib]
+    C --> D[Inicializar GPIO logger camara UI y backend CUDA]
     D --> E[Leer modo desde switch o simulacion]
     E --> F{Modo}
     F -->|EMERGENCY| G[Estado PARO_EMERGENCIA]
@@ -94,9 +108,11 @@ flowchart TD
 
 1. `main.py` carga la configuracion base desde `src/application.py` y la sobreescribe con `config.json`.
 2. Se inicializan GPIO, logger, analizador facial, detector de fatiga, camara y UI.
-3. `CameraManager` abre la camara CSI con GStreamer y captura frames en un hilo separado.
+3. `CameraManager` abre la camara CSI con GStreamer, recibe BGRx directamente
+   de `nvvidconv` y captura frames en un hilo separado.
 4. En cada ciclo, la aplicacion lee el modo activo, toma el frame mas reciente y lo analiza.
-5. `FaceAnalyzer` convierte el frame a escala de grises, aplica preprocesamiento y localiza el rostro.
+5. `FaceAnalyzer` convierte BGRx a gris y localiza el rostro con el backend
+   acelerado disponible; los 68 landmarks y las metricas no cambian.
 6. Si hay rostro, se calculan:
    - EAR: relacion de apertura ocular.
    - MAR: relacion de apertura de boca.
@@ -356,7 +372,7 @@ Nota importante: `requirements.txt` esta vacio actualmente. Eso significa que la
 Desde la carpeta del proyecto:
 
 ```bash
-cd /home/rafael/Documentos/tt2_drowsiness_jetson
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
 source .venv/bin/activate
 ```
 
@@ -514,6 +530,7 @@ El archivo `config.json` concentra los parametros del sistema.
 - `capture_width` y `capture_height`: resolucion de captura de la camara.
 - `processing_width` y `processing_height`: resolucion usada por OpenCV para analizar frames.
 - `fps`: cuadros por segundo solicitados.
+- `output_format`: `BGRx`; evita `videoconvert` y conserva cuatro canales hasta la UI.
 - `flip_method`: orientacion de imagen en el pipeline GStreamer.
 
 ### dlib
@@ -522,10 +539,19 @@ El archivo `config.json` concentra los parametros del sistema.
 - `upsample`: aumenta sensibilidad del detector, pero consume mas CPU.
 - `detection_interval_frames`: cada cuantos frames se redetecta el rostro.
 - `no_face_detection_interval_frames`: separacion de busquedas cuando no hay rostro.
-- `detector_scale`: escala usada por el detector HOG.
-- `tracking_mode`: seguimiento entre redetecciones; V2 usa `landmarks`.
+- `detector_scale`: escala usada por los detectores dlib CNN y HOG.
+- `tracking_mode`: seguimiento entre redetecciones; V3 usa `landmarks`.
 - `pose_interval_frames` y `gaze_interval_frames`: frecuencia de esas
   caracteristicas secundarias.
+
+### Deteccion facial acelerada
+
+- `backend`: `auto` o un backend forzado.
+- `backend_order`: prioridad `dlib_cnn_cuda`, `opencv_cuda_fp16`, `dlib_hog`.
+- `allow_fallback`: mantiene el sistema operativo si falla una ruta acelerada.
+- `warmup`: inicializa CUDA antes de comenzar la captura.
+- `confidence_threshold`: confianza minima del SSD de OpenCV.
+- Las tres rutas de modelo apuntan a archivos instalados por `setup_v3_models.sh`.
 
 ### Rendimiento
 
@@ -713,7 +739,7 @@ Para habilitar registro de eventos, cambiar en `config.json`:
 
 El logger guarda transiciones de estado con timestamp, modo, motivo, metricas principales, FPS, buzzer, frecuencia del buzzer y LEDs activos.
 
-## Optimizacion V2 para Jetson Nano 4 GB
+## Optimizacion V3 para Jetson Nano 4 GB
 
 Esta version mantiene la calibracion O/S/D, la maquina de estados, el predictor
 dlib de 68 landmarks y la asignacion fisica de pines de la version base. Los
@@ -722,16 +748,19 @@ no aporta una observacion nueva.
 
 ### Pipeline implementado
 
-1. GStreamer captura a 1280x720 y entrega cuadros de procesamiento a 640x360
-   con `appsink drop=true max-buffers=1 sync=false`.
+1. GStreamer captura a 1280x720 en NVMM; `nvvidconv` escala a 640x360 y entrega
+   BGRx directamente a `appsink drop=true max-buffers=1 sync=false`. Se elimino
+   `videoconvert`, que ejecutaba una conversion BGR adicional en CPU.
 2. `CameraManager` publica solamente el cuadro mas reciente con un numero de
    secuencia y una condicion de espera. El consumidor no copia el buffer y no
    vuelve a analizar la misma secuencia.
 3. La aplicacion agenda vision a `target_analysis_fps=20`. Esta frecuencia
    preserva resolucion temporal para el parpadeo minimo de 80 ms y deja margen
    de CPU para UI, alertas y sistema operativo.
-4. La busqueda HOG de dlib se ejecuta a escala 0.5: cada 3 analisis sin rostro y
-   cada 12 cuando ya existe seguimiento.
+4. La busqueda primaria usa dlib CNN a escala 0.5 sobre CUDA: cada 3 analisis
+   sin rostro y cada 12 cuando ya existe seguimiento. Si no esta disponible,
+   se activa OpenCV DNN CUDA FP16 y finalmente HOG CPU. Un fallo en ejecucion
+   tambien provoca el cambio, sin derribar la aplicacion.
 5. Entre redetecciones, el rectangulo se actualiza desde los landmarks del
    cuadro anterior; esto resulto mas ligero que el tracker de correlacion en
    este pipeline.
@@ -748,6 +777,11 @@ no aporta una observacion nueva.
 ### Parametros de rendimiento
 
 ```json
+"face_detection": {
+  "backend": "auto",
+  "backend_order": ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"],
+  "allow_fallback": true
+},
 "dlib": {
   "upsample": 0,
   "detection_interval_frames": 12,
@@ -770,18 +804,28 @@ no aporta una observacion nueva.
 Benchmark en la Jetson Nano de desarrollo con la camara CSI activa,
 procesamiento 640x360 y escena sin rostro:
 
-| Metrica | Antes | V2 | Diferencia |
+| Metrica | V2 | V3 | Diferencia |
 | --- | ---: | ---: | ---: |
-| FPS del analizador | 7.812 | 29.328 | 3.75 veces |
-| Latencia media | 122.899 ms | 11.267 ms | -90.8 % |
-| Latencia p95 | 125.718 ms | 33.328 ms | -73.5 % |
+| FPS del analizador | 29.328 | 29.189 | limitado por camara a ~30 FPS |
+| Latencia media | 11.267 ms | 10.526 ms | -6.6 % |
+| Latencia p95 | 33.328 ms | 29.841 ms | -10.5 % |
+
+Microbenchmark aislado del detector a media escala:
+
+| Backend | Media | FPS equivalente |
+| --- | ---: | ---: |
+| dlib CNN CUDA | 27.911 ms | 35.828 |
+| dlib HOG CPU | 30.578 ms | 32.704 |
+| OpenCV DNN CUDA FP16 | 36.850 ms | 27.137 |
+| OpenCV DNN CPU | 206.561 ms | 4.841 |
 
 ```bash
 python3 scripts/benchmark_pipeline.py --seconds 10 --warmup 2
+python3 scripts/benchmark_accelerators.py
 ```
 
-La salida JSON separa las rutas `detector_0.50`,
-`busqueda_espaciada` y `landmarks`, y reporta tiempos de preprocesamiento,
+La salida JSON identifica `dlib_cnn_cuda_0.50`, `busqueda_espaciada` y
+`landmarks`, confirma BGRx/CUDA y reporta tiempos de preprocesamiento,
 localizacion, landmarks y caracteristicas. La escena, iluminacion, presencia
 del rostro, temperatura y modo de energia cambian el resultado; por eso deben
 repetirse tambien pruebas con el usuario frente a la camara.
@@ -790,7 +834,7 @@ repetirse tambien pruebas con el usuario frente a la camara.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile main.py src/*.py tests/*.py
+python3 -m py_compile main.py src/*.py scripts/*.py tests/*.py
 python3 -m json.tool config.json >/dev/null
 tegrastats
 ```
@@ -803,18 +847,25 @@ sudo jetson_clocks
 ```
 
 La interfaz muestra FPS de captura, analisis y objetivo; antiguedad del cuadro;
-ruta de vision; costo por etapa; y cuadros saltados. En operacion final se debe
-vigilar throttling termico durante pruebas largas. Si la carga aun excede el
-presupuesto, el siguiente escalon conservador es procesar a 480x270; migrar a
-TensorRT supondria cambiar el detector/modelo y requiere una validacion de
-precision separada.
+ruta de vision; backend GPU/CPU, causa del fallback, costo por etapa y cuadros
+saltados. En operacion final se debe vigilar throttling termico.
+
+Se intento construir un engine FP16 nativo con `trtexec` de TensorRT 8.2.1 y el
+SSD Caffe oficial. El parser rechazo `clip` en `DetectionOutput` y, despues del
+ajuste diagnostico, fallo en `Concat`, `Softmax` y `Reshape`. No se distribuye
+un engine que no pueda reproducirse ni validarse. V3 selecciona dlib CNN CUDA
+porque fue el backend mas rapido medido; OpenCV DNN CUDA FP16 queda en segundo
+lugar. TensorRT requiere un modelo ONNX compatible y validacion independiente.
 
 ### Limitaciones
 
-- dlib HOG y el predictor de 68 puntos se ejecutan en CPU.
+- La CNN facial se ejecuta en GPU; el predictor de 68 landmarks sigue en CPU.
+- El primer arranque CUDA tarda varios segundos mientras crea el contexto y
+  calienta el backend; no representa la latencia estable por frame.
 - La calibracion es de sesion y debe repetirse al reiniciar.
 - La deteccion facial a media escala exige que el rostro tenga un tamano
   suficiente; la UI permite comprobar calidad y rectangulo en tiempo real.
+- TensorRT nativo no se activa con el SSD Caffe actual por incompatibilidad del parser 8.2.
 
 ## Problemas comunes
 

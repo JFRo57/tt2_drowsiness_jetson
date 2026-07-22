@@ -52,7 +52,7 @@ class VisionSchedulingTests(unittest.TestCase):
         analyzer.frame_index = 1
         analyzer.no_face_detection_interval = 3
         analyzer.last_detection_source = "inicial"
-        analyzer._detect_face = lambda gray: "detectado"
+        analyzer._detect_face = lambda gray, frame=None: "detectado"
         gray = np.zeros((10, 10), dtype=np.uint8)
 
         self.assertEqual("detectado", analyzer._locate_face(gray))
@@ -62,7 +62,7 @@ class VisionSchedulingTests(unittest.TestCase):
         analyzer.frame_index = 3
         self.assertEqual("detectado", analyzer._locate_face(gray))
 
-    def test_v2_defaults_preserve_hardware_and_enable_fast_path(self):
+    def test_v3_defaults_preserve_hardware_and_enable_acceleration(self):
         config = default_config()
         self.assertEqual(33, config["buzzer"]["board_pin"])
         self.assertEqual("pwm_native", config["buzzer"]["type"])
@@ -74,6 +74,27 @@ class VisionSchedulingTests(unittest.TestCase):
         self.assertEqual("landmarks", config["dlib"]["tracking_mode"])
         self.assertEqual(0.5, config["dlib"]["detector_scale"])
         self.assertEqual(20.0, config["performance"]["target_analysis_fps"])
+        self.assertEqual("BGRx", config["camera"]["output_format"])
+        self.assertEqual("auto", config["face_detection"]["backend"])
+        self.assertEqual(
+            ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"],
+            config["face_detection"]["backend_order"],
+        )
+
+    def test_camera_pipeline_uses_direct_bgrx_without_cpu_videoconvert(self):
+        pipeline = CameraManager(default_config()["camera"]).build_pipeline()
+
+        self.assertIn("nvarguscamerasrc", pipeline)
+        self.assertIn("nvvidconv", pipeline)
+        self.assertIn("format=(string)BGRx", pipeline)
+        self.assertNotIn("videoconvert", pipeline)
+        self.assertNotIn("format=(string)BGR !", pipeline)
+
+    def test_bgrx_is_converted_only_for_display(self):
+        frame = np.zeros((20, 30, 4), dtype=np.uint8)
+        display = PresentationUI._display_frame(frame)
+
+        self.assertEqual((20, 30, 3), display.shape)
 
 
 class PerclosTests(unittest.TestCase):

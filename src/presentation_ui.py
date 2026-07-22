@@ -26,7 +26,7 @@ class PresentationUI(object):
         self.created = True
 
     def draw(self, frame, metrics, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
-        view = frame.copy()
+        view = self._display_frame(frame)
         if metrics.get("face_detected"):
             x1, y1, x2, y2 = metrics["rect"]
             cv2.rectangle(view, (x1, y1), (x2, y2), (40, 220, 40), 2)
@@ -51,6 +51,13 @@ class PresentationUI(object):
         cv2.imshow(self.window, view)
         self.drawn_once = True
 
+    @staticmethod
+    def _display_frame(frame):
+        """Convert BGRx only when a three-channel image is needed by the UI."""
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame.copy()
+
     def _add_panel(self, frame, m, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
         panel_w = 460
         h = max(frame.shape[0], 970)
@@ -67,6 +74,12 @@ class PresentationUI(object):
             "Detector de somnolencia para conductores",
             "NVIDIA Jetson Nano 4 GB",
             "Camara IMX219-77IR",
+            "Detector facial: %s (%s)" % (
+                m.get("face_detector_backend", "--"),
+                "GPU" if m.get("face_detector_accelerated") else "CPU",
+            ),
+            "Fallback vision: %s" % (
+                m.get("face_detector_fallback", "ninguno")[:38] or "ninguno"),
             "Modo: %s (%s)" % (mode_controller.mode, mode_controller.source),
             "Estado: %s" % detector.state,
             "Motivo: %s" % detector.reason[:38],

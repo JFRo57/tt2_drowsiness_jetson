@@ -7,6 +7,8 @@ import cv2
 import dlib
 import numpy as np
 
+from .face_detector import FaceDetectorBackend
+
 
 LEFT_EYE = list(range(42, 48))
 RIGHT_EYE = list(range(36, 42))
@@ -50,7 +52,7 @@ class FaceAnalyzer(object):
         if not os.path.exists(predictor_path):
             raise RuntimeError("Predictor facial no encontrado: %s" % predictor_path)
 
-        self.detector = dlib.get_frontal_face_detector()
+        self.face_detector = FaceDetectorBackend(config)
         self.predictor = dlib.shape_predictor(predictor_path)
         self.tracker = None
         self.last_rect = None
@@ -90,7 +92,10 @@ class FaceAnalyzer(object):
             )
 
     def preprocess(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+        else:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         brightness = float(cv2.mean(gray)[0])
         needs_clahe = (
             self.use_clahe
@@ -112,7 +117,7 @@ class FaceAnalyzer(object):
         preprocess_done = time.perf_counter()
 
         self.frame_index += 1
-        rect = self._locate_face(gray)
+        rect = self._locate_face(gray, frame)
         locate_done = time.perf_counter()
         if rect is None:
             return self._no_face_metrics(
@@ -170,7 +175,7 @@ class FaceAnalyzer(object):
             landmarks_done,
             finished,
         )
-        return {
+        metrics = {
             "face_detected": True,
             "rect": (rect.left(), rect.top(), rect.right(), rect.bottom()),
             "landmarks": landmarks,
@@ -190,6 +195,8 @@ class FaceAnalyzer(object):
             "analysis_source": self.last_detection_source,
             "analysis_breakdown_ms": timing,
         }
+        metrics.update(self.face_detector.status())
+        return metrics
 
     def _no_face_metrics(self, brightness, started, preprocess_done, locate_done):
         finished = time.perf_counter()
@@ -200,13 +207,15 @@ class FaceAnalyzer(object):
             locate_done,
             finished,
         )
-        return {
+        metrics = {
             "face_detected": False,
             "brightness": brightness,
             "quality": 0.0,
             "analysis_source": self.last_detection_source,
             "analysis_breakdown_ms": timing,
         }
+        metrics.update(self.face_detector.status())
+        return metrics
 
     @staticmethod
     def _timing(started, preprocess_done, locate_done, landmarks_done, finished):
@@ -218,13 +227,13 @@ class FaceAnalyzer(object):
             "total": (finished - started) * 1000.0,
         }
 
-    def _locate_face(self, gray):
+    def _locate_face(self, gray, frame=None):
         if self.last_rect is None:
             should_detect = self.frame_index == 1 or self.frame_index % self.no_face_detection_interval == 0
             if not should_detect:
                 self.last_detection_source = "busqueda_espaciada"
                 return None
-            return self._detect_face(gray)
+            return self._detect_face(gray, frame)
 
         should_redetect = self.frame_index % self.detection_interval == 0
         if self.tracking_mode == "correlation" and self.tracker is not None and not should_redetect:
@@ -243,38 +252,15 @@ class FaceAnalyzer(object):
             should_redetect = True
 
         if should_redetect:
-            return self._detect_face(gray)
+            return self._detect_face(gray, frame)
 
         self.last_detection_source = "landmarks"
         return self.last_rect
 
-    def _detect_face(self, gray):
+    def _detect_face(self, gray, frame=None):
         scale = self.detector_scale
-        if scale < 0.999:
-            small = cv2.resize(
-                gray,
-                None,
-                fx=scale,
-                fy=scale,
-                interpolation=cv2.INTER_AREA,
-            )
-            rects = self.detector(small, int(self.config["dlib"].get("upsample", 0)))
-            if rects:
-                inverse = 1.0 / scale
-                scaled = []
-                for rect in rects:
-                    scaled.append(self._clamp_rect(
-                        int(round(rect.left() * inverse)),
-                        int(round(rect.top() * inverse)),
-                        int(round(rect.right() * inverse)),
-                        int(round(rect.bottom() * inverse)),
-                        gray.shape,
-                    ))
-                rects = scaled
-            self.last_detection_source = "detector_%.2f" % scale
-        else:
-            rects = self.detector(gray, int(self.config["dlib"].get("upsample", 0)))
-            self.last_detection_source = "detector_1.00"
+        rects = self.face_detector.detect(gray, frame, scale)
+        self.last_detection_source = self.face_detector.last_source
 
         if not rects:
             self._clear_tracking(self.last_detection_source)

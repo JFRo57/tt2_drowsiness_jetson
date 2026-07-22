@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import cv2
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,7 @@ def main():
     if not camera.start():
         print(json.dumps({"error": camera.error or "No se pudo abrir la camara"}))
         return 1
+    detector_status = analyzer.face_detector.status()
     try:
         warmup_deadline = time.monotonic() + max(0.0, args.warmup)
         while time.monotonic() < warmup_deadline:
@@ -97,6 +99,9 @@ def main():
             name: round(total / max(1, unique_frames), 3)
             for name, total in sorted(stage_totals.items())
         },
+        "camera_output_format": config["camera"].get("output_format", "BGRx"),
+        "face_detector": detector_status,
+        "opencv_cuda_devices": int(cv2.cuda.getCudaEnabledDeviceCount()),
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

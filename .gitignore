@@ -31,6 +31,9 @@ logs/
 # Large local dlib models
 models/*.dat
 models/*.bz2
+models/*.caffemodel
+models/*.prototxt
+models/*.engine
 
 # Editors and operating systems
 .vscode/
