@@ -28,6 +28,7 @@ class GPIOController(object):
         self.buzzer_stop = threading.Event()
         self.software_buzzer_frequency = 0
         self.leds = {"green": False, "yellow": False, "red": False}
+        self._led_output_state = None
         self.simulated_mode = ModeController.AUTOMATIC
         self.mode_source = "simulado"
         self.error = None
@@ -276,14 +277,22 @@ class GPIOController(object):
 
     def set_led_state(self, green=False, yellow=False, red=False):
         with self.lock:
-            self.leds = {"green": bool(green), "yellow": bool(yellow), "red": bool(red)}
+            desired = (bool(green), bool(yellow), bool(red))
+            self.leds = {
+                "green": desired[0],
+                "yellow": desired[1],
+                "red": desired[2],
+            }
             if self.simulation_mode or self.GPIO is None or not self.led_cfg.get("enabled", True):
+                return
+            if desired == self._led_output_state:
                 return
             active_high = self.led_cfg.get("active_high", True)
             pins = {"green": int(self.led_cfg["green_board_pin"]), "yellow": int(self.led_cfg["yellow_board_pin"]), "red": int(self.led_cfg["red_board_pin"])}
             for name, pin in pins.items():
                 level = self._active_level(active_high) if self.leds[name] else self._inactive_level(active_high)
                 self.GPIO.output(pin, level)
+            self._led_output_state = desired
 
     def read_switch_mode(self):
         if self.simulation_mode or self.GPIO is None or not self.switch_cfg.get("enabled", False):
@@ -352,3 +361,4 @@ class GPIOController(object):
                 self.GPIO.cleanup()
         finally:
             self.GPIO = None
+            self._led_output_state = None

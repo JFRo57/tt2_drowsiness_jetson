@@ -19,8 +19,9 @@ from .shutdown_manager import ShutdownManager
 def default_config():
     return {
         "camera": {"sensor_id": 0, "capture_width": 1280, "capture_height": 720, "processing_width": 640, "processing_height": 360, "display_width": 1100, "display_height": 620, "fps": 30, "flip_method": 2, "reconnect_attempts": 3},
-        "dlib": {"predictor_path": "models/shape_predictor_68_face_landmarks.dat", "upsample": 0, "detection_interval_frames": 5, "use_correlation_tracker": True},
-        "preprocessing": {"use_clahe": True, "clahe_clip_limit": 2.0, "clahe_grid_size": 8, "use_gamma": False, "gamma": 1.0},
+        "dlib": {"predictor_path": "models/shape_predictor_68_face_landmarks.dat", "upsample": 0, "detection_interval_frames": 12, "no_face_detection_interval_frames": 3, "detector_scale": 0.5, "tracking_mode": "landmarks", "use_correlation_tracker": False, "tracker_quality_threshold": 6.5, "pose_interval_frames": 2, "gaze_interval_frames": 2},
+        "preprocessing": {"use_clahe": True, "adaptive_clahe": True, "clahe_dark_threshold": 75.0, "clahe_bright_threshold": 205.0, "clahe_clip_limit": 2.0, "clahe_grid_size": 8, "use_gamma": False, "gamma": 1.0},
+        "performance": {"target_analysis_fps": 20.0, "frame_wait_timeout_seconds": 0.1, "opencv_threads": 2, "opencv_optimized": True},
         "fatigue": {"ear_threshold": 0.22, "use_session_calibration": True, "blink_min_seconds": 0.08, "blink_max_seconds": 0.70, "prealert_closed_seconds": 0.45, "alert_closed_seconds": 0.85, "critical_closed_seconds": 1.6, "recovery_seconds": 1.0, "perclos_window_seconds": 60, "perclos_warning_threshold": 0.25, "perclos_alert_threshold": 0.35, "mar_threshold": 0.65, "yawn_min_seconds": 1.0, "head_nod_pitch_threshold": 18.0, "head_nod_min_seconds": 0.8, "gaze_away_warning_seconds": 2.0, "no_face_warning_seconds": 2.0},
         "calibration": {"duration_seconds": 4.0, "min_samples": 12, "quality_threshold": 0.30, "min_ear_gap": 0.015, "max_ear_std": 0.08, "max_profile_distance": 4.0, "profile_min_confidence": 0.15, "profile_warning_seconds": 0.8, "feature_scales": {"ear": 0.04, "mar": 0.15, "pitch": 12.0, "yaw": 15.0, "roll": 15.0}},
         "gpio": {"enabled": False, "simulation_mode": True, "numbering": "BOARD"},
@@ -33,11 +34,11 @@ def default_config():
 
 
 def deep_update(dst, src):
-    for k, v in src.items():
-        if isinstance(v, dict) and isinstance(dst.get(k), dict):
-            deep_update(dst[k], v)
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            deep_update(dst[key], value)
         else:
-            dst[k] = v
+            dst[key] = value
     return dst
 
 
@@ -61,6 +62,21 @@ class DrowsinessApplication(object):
         self.error = None
         self.forced_test_state = None
 
+        performance = config.get("performance", {})
+        self.target_analysis_fps = max(
+            1.0,
+            float(performance.get("target_analysis_fps", 20.0)),
+        )
+        self.analysis_period = 1.0 / self.target_analysis_fps
+        self.frame_wait_timeout = max(
+            0.01,
+            float(performance.get("frame_wait_timeout_seconds", 0.1)),
+        )
+        camera_fps = max(1.0, float(config["camera"].get("fps", 30.0)))
+        self.analysis_tolerance = 0.5 / camera_fps
+        self.analysis_skipped_frames = 0
+        self.capture_dropped_frames = 0
+
     def start_calibration(self, profile="OPEN"):
         self.forced_test_state = None
         self.detector.reset()
@@ -69,6 +85,9 @@ class DrowsinessApplication(object):
     def run(self):
         exit_code = 0
         try:
+            performance = self.config.get("performance", {})
+            cv2.setUseOptimized(bool(performance.get("opencv_optimized", True)))
+            cv2.setNumThreads(max(0, int(performance.get("opencv_threads", 2))))
             self.gpio.setup()
             self.logger.open()
             self.face = FaceAnalyzer(self.config)
@@ -93,43 +112,91 @@ class DrowsinessApplication(object):
         frames = 0
         last_fps = time.monotonic()
         last_metrics = {"face_detected": False, "quality": 0.0}
+        last_sequence = -1
+        next_analysis_at = 0.0
+        last_frame = None
+
         while not self.shutdown.requested:
             self.mode.update_from_switch(self.gpio)
-            if self.mode.mode == ModeController.EMERGENCY:
-                state, reason = self.detector.update({"face_detected": False}, self.mode.mode)
-                self.alerts.update(state, self.mode.mode)
-                self._render_if_needed(last_metrics)
-                if not self.ui:
-                    time.sleep(0.05)
-                continue
-            frame, ts = self.camera.get_latest_frame()
+            frame, timestamp, sequence = self.camera.wait_for_frame(
+                last_sequence,
+                timeout=self.frame_wait_timeout,
+                copy=False,
+            )
             if frame is None:
                 if self.camera.error:
                     raise RuntimeError(self.camera.error)
-                time.sleep(0.01)
+                if self.ui and last_frame is not None:
+                    self._render_if_needed(last_metrics, last_frame)
                 continue
+
+            if last_sequence >= 0 and sequence > last_sequence + 1:
+                self.capture_dropped_frames += sequence - last_sequence - 1
+            last_sequence = sequence
+            last_frame = frame
+
+            if self.mode.mode == ModeController.EMERGENCY:
+                state, reason = self.detector.update(
+                    {"face_detected": False},
+                    self.mode.mode,
+                )
+                self.alerts.update(state, self.mode.mode)
+                self._render_if_needed(last_metrics, frame)
+                continue
+
             if self.ui and self.ui.paused:
                 self._render_if_needed(last_metrics, frame)
                 continue
+
             if self.forced_test_state:
                 metrics = dict(last_metrics)
                 metrics["runtime_seconds"] = time.monotonic() - self.started_at
                 metrics["analysis_ms"] = self.analysis_ms
                 state, reason = self._apply_forced_test_state()
                 self.alerts.update(state, self.mode.mode)
-                self.logger.log_transition(self.mode.mode, self.detector.previous_state, state, reason, metrics, self.analysis_fps, self.gpio)
+                self.logger.log_transition(
+                    self.mode.mode,
+                    self.detector.previous_state,
+                    state,
+                    reason,
+                    metrics,
+                    self.analysis_fps,
+                    self.gpio,
+                )
                 self._render_if_needed(metrics, frame)
                 if self.camera.error:
                     raise RuntimeError(self.camera.error)
                 continue
+
+            now = time.monotonic()
+            if now < next_analysis_at - self.analysis_tolerance:
+                self.analysis_skipped_frames += 1
+                continue
+            if next_analysis_at <= 0.0:
+                next_analysis_at = now + self.analysis_period
+            else:
+                next_analysis_at += self.analysis_period
+                while next_analysis_at <= now:
+                    next_analysis_at += self.analysis_period
+
             analysis_started = time.monotonic()
             metrics = self.face.analyze(frame)
+            metrics["frame_sequence"] = sequence
+            metrics["frame_age_ms"] = max(
+                0.0,
+                (analysis_started - timestamp) * 1000.0,
+            )
+            metrics["analysis_skipped_frames"] = self.analysis_skipped_frames
+            metrics["capture_dropped_frames"] = self.capture_dropped_frames
+            metrics["target_analysis_fps"] = self.target_analysis_fps
+
             classification = self.calibration.classify(metrics)
             metrics["calibrated_profile"] = classification["profile"]
             metrics["calibrated_profile_confidence"] = classification["confidence"]
             metrics["calibrated_profile_scores"] = classification["scores"]
             metrics.update(self.calibration.status_metrics())
             last_metrics = metrics
+
             was_calibrating = self.calibration.active
             calibration_result = self.calibration.update(metrics)
             if calibration_result is not None:
@@ -137,6 +204,7 @@ class DrowsinessApplication(object):
                 metrics.update(self.calibration.status_metrics())
             if was_calibrating and not self.calibration.active:
                 self.detector.reset()
+
             if self.calibration.active:
                 self.detector.previous_state = self.detector.state
                 self.detector.state = "CALIBRANDO"
@@ -144,11 +212,21 @@ class DrowsinessApplication(object):
                 state, reason = self.detector.state, self.detector.reason
             else:
                 state, reason = self.detector.update(metrics, self.mode.mode)
+
             self.analysis_ms = (time.monotonic() - analysis_started) * 1000.0
             metrics["runtime_seconds"] = time.monotonic() - self.started_at
             metrics["analysis_ms"] = self.analysis_ms
             self.alerts.update(state, self.mode.mode)
-            self.logger.log_transition(self.mode.mode, self.detector.previous_state, state, reason, metrics, self.analysis_fps, self.gpio)
+            self.logger.log_transition(
+                self.mode.mode,
+                self.detector.previous_state,
+                state,
+                reason,
+                metrics,
+                self.analysis_fps,
+                self.gpio,
+            )
+
             frames += 1
             now = time.monotonic()
             if now - last_fps >= 1.0:
@@ -164,13 +242,25 @@ class DrowsinessApplication(object):
             time.sleep(0.001)
             return
         if frame is None:
-            frame, _ = self.camera.get_latest_frame()
+            frame, _ = self.camera.get_latest_frame(copy=False)
         if frame is not None:
-            metrics = dict(metrics)
-            metrics.update(self.calibration.status_metrics())
-            metrics.setdefault("runtime_seconds", time.monotonic() - self.started_at)
-            metrics.setdefault("analysis_ms", self.analysis_ms)
-            self.ui.draw(frame, metrics, self.detector, self.mode, self.gpio, self.camera.capture_fps, self.analysis_fps, self.hardware_mode())
+            rendered_metrics = dict(metrics)
+            rendered_metrics.update(self.calibration.status_metrics())
+            rendered_metrics.setdefault(
+                "runtime_seconds",
+                time.monotonic() - self.started_at,
+            )
+            rendered_metrics.setdefault("analysis_ms", self.analysis_ms)
+            self.ui.draw(
+                frame,
+                rendered_metrics,
+                self.detector,
+                self.mode,
+                self.gpio,
+                self.camera.capture_fps,
+                self.analysis_fps,
+                self.hardware_mode(),
+            )
         key = cv2.waitKey(1) & 0xFF
         if key != 255:
             self.ui.handle_key(key, self)
@@ -199,7 +289,11 @@ class DrowsinessApplication(object):
             "ALERTA_CRITICA": "Prueba manual de salidas: ALERTA_CRITICA",
             "ROSTRO_NO_DETECTADO": "Prueba manual de salidas: ROSTRO_NO_DETECTADO",
         }
-        return self.detector._set(state, reasons.get(state, "Prueba manual de salidas"), now)
+        return self.detector._set(
+            state,
+            reasons.get(state, "Prueba manual de salidas"),
+            now,
+        )
 
     def cleanup(self):
         try:

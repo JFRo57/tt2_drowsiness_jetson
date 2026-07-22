@@ -31,7 +31,11 @@ class FatigueDetector(object):
         self.no_face_since = None
         self.recovery_since = None
         self.last_transition = time.monotonic()
-        self.perclos = deque(maxlen=3000)
+        self.perclos = deque()
+        self._perclos_total_seconds = 0.0
+        self._perclos_closed_seconds = 0.0
+        self._perclos_last_time = None
+        self._perclos_last_closed = False
         self.blinks = deque(maxlen=120)
         self.yawns = deque(maxlen=20)
         self.closed_duration = 0.0
@@ -54,6 +58,10 @@ class FatigueDetector(object):
         self.recovery_since = None
         self.last_transition = time.monotonic()
         self.perclos.clear()
+        self._perclos_total_seconds = 0.0
+        self._perclos_closed_seconds = 0.0
+        self._perclos_last_time = None
+        self._perclos_last_closed = False
         self.blinks.clear()
         self.yawns.clear()
         self.closed_duration = 0.0
@@ -84,10 +92,13 @@ class FatigueDetector(object):
         now = time.monotonic()
         self.previous_state = self.state
         if mode == "EMERGENCY":
+            self._pause_perclos(now)
             return self._set("PARO_EMERGENCIA", "Paro de emergencia activo", now)
         if mode == "MAINTENANCE":
+            self._pause_perclos(now)
             return self._set("MANTENIMIENTO", "Modo mantenimiento: alerta auditiva suspendida", now)
         if not metrics.get("face_detected", False):
+            self._pause_perclos(now)
             if self.no_face_since is None:
                 self.no_face_since = now
             no_face_time = now - self.no_face_since
@@ -131,24 +142,51 @@ class FatigueDetector(object):
         return self._decide(now, metrics, closed, reliable)
 
     def _update_perclos(self, now, closed):
-        self.perclos.append((now, closed))
-        win = float(self.config["perclos_window_seconds"])
-        while self.perclos and now - self.perclos[0][0] > win:
-            self.perclos.popleft()
+        if self._perclos_last_time is not None:
+            start = self._perclos_last_time
+            duration = max(0.0, now - start)
+            if duration > 0.0:
+                segment = (start, now, self._perclos_last_closed)
+                self.perclos.append(segment)
+                self._perclos_total_seconds += duration
+                if self._perclos_last_closed:
+                    self._perclos_closed_seconds += duration
+        self._perclos_last_time = now
+        self._perclos_last_closed = bool(closed)
+        self._prune_perclos(now)
 
     def current_perclos(self, now):
-        if len(self.perclos) < 2:
+        self._prune_perclos(now)
+        if self._perclos_total_seconds <= 0.0:
             return 0.0
-        total = 0.0
-        closed_total = 0.0
-        prev_t, prev_closed = self.perclos[0]
-        for t, closed in list(self.perclos)[1:]:
-            dt = max(0.0, t - prev_t)
-            total += dt
-            if prev_closed:
-                closed_total += dt
-            prev_t, prev_closed = t, closed
-        return closed_total / total if total > 0 else 0.0
+        value = self._perclos_closed_seconds / self._perclos_total_seconds
+        return max(0.0, min(1.0, value))
+
+    def _pause_perclos(self, now):
+        self._perclos_last_time = None
+        self._perclos_last_closed = False
+        self._prune_perclos(now)
+
+    def _prune_perclos(self, now):
+        cutoff = now - float(self.config["perclos_window_seconds"])
+        while self.perclos and self.perclos[0][1] <= cutoff:
+            start, end, closed = self.perclos.popleft()
+            duration = max(0.0, end - start)
+            self._perclos_total_seconds -= duration
+            if closed:
+                self._perclos_closed_seconds -= duration
+        if self.perclos and self.perclos[0][0] < cutoff:
+            start, end, closed = self.perclos.popleft()
+            removed = max(0.0, cutoff - start)
+            self._perclos_total_seconds -= removed
+            if closed:
+                self._perclos_closed_seconds -= removed
+            self.perclos.appendleft((cutoff, end, closed))
+        self._perclos_total_seconds = max(0.0, self._perclos_total_seconds)
+        self._perclos_closed_seconds = max(
+            0.0,
+            min(self._perclos_closed_seconds, self._perclos_total_seconds),
+        )
 
     def _update_eye_timing(self, now, closed, reliable):
         if not reliable:

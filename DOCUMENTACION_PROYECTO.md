@@ -502,7 +502,8 @@ clasificador personal de sesion utiliza EAR, MAR, pitch, yaw, roll y mirada para
 comparar cada frame contra los tres perfiles. Los perfiles solo se mantienen en
 memoria y deben capturarse de nuevo despues de reiniciar el programa.
 
-Si falla una captura, revisar el encuadre, iluminacion, calidad del rostro,
+Si falla una captura, revisar el encuadre, la iluminacion y la calidad del
+rostro antes de repetir el perfil.
 
 ## Configuracion principal
 
@@ -520,7 +521,18 @@ El archivo `config.json` concentra los parametros del sistema.
 - `predictor_path`: ruta del modelo de 68 landmarks.
 - `upsample`: aumenta sensibilidad del detector, pero consume mas CPU.
 - `detection_interval_frames`: cada cuantos frames se redetecta el rostro.
-- `use_correlation_tracker`: usa tracker entre detecciones para reducir carga.
+- `no_face_detection_interval_frames`: separacion de busquedas cuando no hay rostro.
+- `detector_scale`: escala usada por el detector HOG.
+- `tracking_mode`: seguimiento entre redetecciones; V2 usa `landmarks`.
+- `pose_interval_frames` y `gaze_interval_frames`: frecuencia de esas
+  caracteristicas secundarias.
+
+### Rendimiento
+
+- `target_analysis_fps`: presupuesto de analisis por segundo.
+- `frame_wait_timeout_seconds`: espera maxima por una secuencia nueva.
+- `opencv_threads`: hilos internos permitidos a OpenCV.
+- `opencv_optimized`: activa las rutas optimizadas disponibles en OpenCV.
 
 ### Fatiga
 
@@ -701,69 +713,108 @@ Para habilitar registro de eventos, cambiar en `config.json`:
 
 El logger guarda transiciones de estado con timestamp, modo, motivo, metricas principales, FPS, buzzer, frecuencia del buzzer y LEDs activos.
 
-## Optimizacion para Jetson Nano 4 GB
+## Optimizacion V2 para Jetson Nano 4 GB
 
-La configuracion actual ya incluye varias decisiones razonables para Jetson Nano:
+Esta version mantiene la calibracion O/S/D, la maquina de estados, el predictor
+dlib de 68 landmarks y la asignacion fisica de pines de la version base. Los
+cambios son exclusivamente de software y se concentran en evitar trabajo que
+no aporta una observacion nueva.
 
-- Captura a 1280x720, pero procesamiento a 640x360.
-- `upsample` en `0`, lo cual evita una carga alta en dlib.
-- `detection_interval_frames` en `5`, por lo que no se redetecta el rostro en cada frame.
-- `use_correlation_tracker` en `true`, lo que reduce costo entre detecciones.
-- `appsink drop=true max-buffers=1 sync=false`, lo que evita acumulacion de frames viejos.
-- Hilo dedicado de captura para no bloquear el analisis.
+### Pipeline implementado
 
-Con esas decisiones, el proyecto esta moderadamente optimizado para Jetson Nano. No obstante, no se puede afirmar que este suficientemente optimizado sin medir FPS real, temperatura y uso de CPU/GPU en tu Jetson, porque dlib con 68 landmarks es pesado para ese hardware.
+1. GStreamer captura a 1280x720 y entrega cuadros de procesamiento a 640x360
+   con `appsink drop=true max-buffers=1 sync=false`.
+2. `CameraManager` publica solamente el cuadro mas reciente con un numero de
+   secuencia y una condicion de espera. El consumidor no copia el buffer y no
+   vuelve a analizar la misma secuencia.
+3. La aplicacion agenda vision a `target_analysis_fps=20`. Esta frecuencia
+   preserva resolucion temporal para el parpadeo minimo de 80 ms y deja margen
+   de CPU para UI, alertas y sistema operativo.
+4. La busqueda HOG de dlib se ejecuta a escala 0.5: cada 3 analisis sin rostro y
+   cada 12 cuando ya existe seguimiento.
+5. Entre redetecciones, el rectangulo se actualiza desde los landmarks del
+   cuadro anterior; esto resulto mas ligero que el tracker de correlacion en
+   este pipeline.
+6. EAR y MAR se calculan en cada analisis. Pose y mirada se calculan cada 2
+   analisis y reutilizan su ultimo valor.
+7. CLAHE se aplica solo con luminosidad menor de 75 o mayor de 205. La tabla
+   gamma, matrices de pose y buffers de interfaz se conservan entre cuadros.
+8. PERCLOS mantiene acumuladores temporales y poda segmentos de la ventana; ya
+   no recorre todas las muestras en cada actualizacion ni cuenta periodos sin
+   rostro.
+9. El controlador GPIO evita reescribir tres LEDs si el estado no cambio. PWM2
+   nativo y todos los pines permanecen sin modificaciones.
 
-### Recomendacion practica
-
-Para considerar que esta suficientemente optimizado, verifica en la Jetson:
-
-- `FPS captura/analisis` estable en la UI.
-- Analisis idealmente cerca de 15 FPS o mas para una alerta fluida.
-- Temperatura sin throttling durante una prueba de 10 a 20 minutos.
-- Retardo bajo entre cierre de ojos y alerta.
-
-Puedes monitorear la Jetson con:
-
-```bash
-tegrastats
-```
-
-### Ajustes si va lenta
-
-Si el analisis baja demasiado:
-
-1. Reducir `processing_width` y `processing_height` a `480x270`.
-2. Subir `detection_interval_frames` de `5` a `8` o `10`.
-3. Mantener `upsample` en `0`.
-4. Desactivar landmarks visuales con `L` durante uso normal.
-5. Ejecutar en modo headless si no necesitas UI.
-6. Desactivar CLAHE si la iluminacion es buena:
+### Parametros de rendimiento
 
 ```json
-"preprocessing": {
-  "use_clahe": false
+"dlib": {
+  "upsample": 0,
+  "detection_interval_frames": 12,
+  "no_face_detection_interval_frames": 3,
+  "detector_scale": 0.5,
+  "tracking_mode": "landmarks",
+  "pose_interval_frames": 2,
+  "gaze_interval_frames": 2
+},
+"performance": {
+  "target_analysis_fps": 20,
+  "frame_wait_timeout_seconds": 0.1,
+  "opencv_threads": 2,
+  "opencv_optimized": true
 }
 ```
 
-7. Usar modo de energia maximo en Jetson Nano antes de pruebas largas:
+### Medicion reproducible
+
+Benchmark en la Jetson Nano de desarrollo con la camara CSI activa,
+procesamiento 640x360 y escena sin rostro:
+
+| Metrica | Antes | V2 | Diferencia |
+| --- | ---: | ---: | ---: |
+| FPS del analizador | 7.812 | 29.328 | 3.75 veces |
+| Latencia media | 122.899 ms | 11.267 ms | -90.8 % |
+| Latencia p95 | 125.718 ms | 33.328 ms | -73.5 % |
+
+```bash
+python3 scripts/benchmark_pipeline.py --seconds 10 --warmup 2
+```
+
+La salida JSON separa las rutas `detector_0.50`,
+`busqueda_espaciada` y `landmarks`, y reporta tiempos de preprocesamiento,
+localizacion, landmarks y caracteristicas. La escena, iluminacion, presencia
+del rostro, temperatura y modo de energia cambian el resultado; por eso deben
+repetirse tambien pruebas con el usuario frente a la camara.
+
+### Validacion y operacion
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile main.py src/*.py tests/*.py
+python3 -m json.tool config.json >/dev/null
+tegrastats
+```
+
+Opcionalmente, para una sesion de rendimiento maximo:
 
 ```bash
 sudo nvpmodel -m 0
 sudo jetson_clocks
 ```
 
-### Limitaciones actuales de optimizacion
+La interfaz muestra FPS de captura, analisis y objetivo; antiguedad del cuadro;
+ruta de vision; costo por etapa; y cuadros saltados. En operacion final se debe
+vigilar throttling termico durante pruebas largas. Si la carga aun excede el
+presupuesto, el siguiente escalon conservador es procesar a 480x270; migrar a
+TensorRT supondria cambiar el detector/modelo y requiere una validacion de
+precision separada.
 
-- dlib no aprovecha plenamente la GPU de Jetson Nano en esta implementacion.
-- El predictor de 68 landmarks pesa alrededor de 99 MB y puede ser costoso para CPU.
-- `requirements.txt` no documenta dependencias, lo que dificulta reproducir el entorno.
-- No hay pruebas automatizadas ni script de benchmark incluido.
-- `CameraManager.get_latest_frame()` copia cada frame; es seguro, pero agrega algo de costo.
+### Limitaciones
 
-### Conclusion sobre optimizacion
-
-Para tu hardware objetivo, Jetson Nano 4 GB, la base esta bien orientada y usa parametros conservadores. La parte mas pesada es dlib. Si en pruebas reales el analisis se mantiene sobre 15 FPS y no hay throttling termico, la optimizacion es suficiente para un prototipo funcional. Si cae por debajo de 10 FPS o hay mucho retardo, conviene bajar resolucion de procesamiento, aumentar el intervalo de deteccion o migrar la deteccion facial/landmarks a una alternativa acelerada por TensorRT o MediaPipe optimizado para Jetson.
+- dlib HOG y el predictor de 68 puntos se ejecutan en CPU.
+- La calibracion es de sesion y debe repetirse al reiniciar.
+- La deteccion facial a media escala exige que el rostro tenga un tamano
+  suficiente; la UI permite comprobar calidad y rectangulo en tiempo real.
 
 ## Problemas comunes
 
@@ -798,4 +849,3 @@ Si se mueve el archivo, actualizar `dlib.predictor_path` en `config.json`.
 - Revisar permisos de ejecucion.
 - Confirmar numeracion `BOARD`.
 - Revisar cableado y resistencias.
-

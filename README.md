@@ -1,6 +1,6 @@
-# TT2 Drowsiness Jetson
+# TT2 Drowsiness Jetson V2
 
-> **Detección de somnolencia en tiempo real para NVIDIA Jetson Nano, con visión artificial y alertas físicas mediante GPIO.**
+> **Detección de somnolencia optimizada para NVIDIA Jetson Nano, con calibración personal, interfaz en tiempo real y alertas GPIO.**
 
 [![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![NVIDIA Jetson Nano](https://img.shields.io/badge/NVIDIA-Jetson%20Nano-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/embedded/jetson-nano)
@@ -12,7 +12,7 @@
 
 ## 📌 Descripción general
 
-**TT2 Drowsiness Jetson** es un sistema embebido para detectar señales de
+**TT2 Drowsiness Jetson V2** es un sistema embebido para detectar señales de
 somnolencia y distracción mediante una cámara CSI. Procesa video en tiempo real,
 localiza el rostro y sus 68 puntos faciales, calcula métricas como **EAR**,
 **MAR**, **PERCLOS**, pose de cabeza y dirección de mirada, y clasifica el nivel
@@ -37,8 +37,15 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - Ejecución con GPIO físico o en modo completamente simulado.
 - Alertas con LEDs y buzzer pasivo **MH-FMD/YL-44 low-level trigger**.
 - PWM2 nativo para mantener el tono estable bajo carga de OpenCV y dlib.
+- Pipeline **latest-only**: nunca procesa dos veces el mismo cuadro ni acumula
+  video atrasado.
+- Detección facial a media escala, seguimiento ligero por landmarks y
+  redetección periódica.
+- CLAHE adaptativo, pose/mirada desacopladas y PERCLOS incremental.
+- Objetivo de análisis configurable de **20 FPS** y telemetría por etapa en la
+  interfaz.
 - Registro opcional de transiciones de estado en CSV.
-- Pruebas unitarias para el controlador GPIO/PWM.
+- Pruebas unitarias de calibración, estados, GPIO/PWM y ruta optimizada.
 
 ---
 
@@ -78,6 +85,38 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 
 ---
 
+## ⚡ Rendimiento de la V2
+
+La optimización conserva el predictor dlib de 68 puntos y todo el hardware de
+la versión base. El trabajo se reduce en los lugares de mayor costo:
+
+- Captura en hilo independiente con espera por secuencia y acceso sin copia.
+- Detección HOG a escala `0.5`, cada 3 análisis durante búsqueda y cada 12 con
+  un rostro seguido.
+- Seguimiento del ROI mediante landmarks entre redetecciones.
+- Pose y mirada cada 2 análisis, reutilizando el último valor válido.
+- CLAHE únicamente cuando la luminosidad sale del rango configurado.
+- Escrituras LED agrupadas, panel gráfico reutilizable y PERCLOS incremental.
+
+Benchmark realizado en esta Jetson Nano, cámara CSI a procesamiento
+**640×360**, escena sin rostro:
+
+| Métrica | Antes | V2 optimizada | Cambio |
+| :--- | ---: | ---: | ---: |
+| FPS del analizador | 7.812 | 29.328 | **3.75×** |
+| Latencia media | 122.899 ms | 11.267 ms | **−90.8 %** |
+| Latencia p95 | 125.718 ms | 33.328 ms | **−73.5 %** |
+
+La aplicación limita deliberadamente el análisis a **20 FPS** para reservar
+CPU a la interfaz y a GPIO. Los resultados dependen de iluminación, presencia
+del rostro, temperatura y modo de energía. Para repetir la medición:
+
+```bash
+python3 scripts/benchmark_pipeline.py --seconds 10 --warmup 2
+```
+
+---
+
 ## 🚀 Requisitos previos e instalación
 
 ### Requisitos de hardware
@@ -107,8 +146,8 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 1. **Clonar el repositorio:**
 
    ```bash
-   git clone https://github.com/JFRo57/tt2_drowsiness_jetson.git
-   cd tt2_drowsiness_jetson
+   git clone --branch v2 https://github.com/JFRo57/tt2_drowsiness_jetson.git tt2_drowsiness_jetson_v2
+   cd tt2_drowsiness_jetson_v2
    ```
 
 2. **Crear un entorno virtual reutilizando los paquetes de JetPack:**
@@ -217,6 +256,13 @@ sonando. Por ello no debe utilizarse sobre BOARD 33 con este buzzer.
 
 ## ▶️ Ejecución
 
+Activa siempre el entorno virtual independiente de esta versión:
+
+```bash
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v2
+source .venv/bin/activate
+```
+
 ### Interfaz con hardware simulado
 
 ```bash
@@ -227,6 +273,12 @@ python3 main.py --presentation --simulation
 
 ```bash
 python3 main.py --headless --simulation
+```
+
+### Ejecución headless con GPIO físico
+
+```bash
+python3 main.py --headless
 ```
 
 ### Interfaz con GPIO físico
@@ -358,17 +410,24 @@ python3 -m json.tool config.json >/dev/null
 Las pruebas GPIO unitarias utilizan un sysfs temporal y no activan el buzzer
 físico. Para validar el hardware utiliza `--gpio-self-test`.
 
+Para medir exclusivamente cámara y visión, sin interfaz ni GPIO:
+
+```bash
+python3 scripts/benchmark_pipeline.py --seconds 15
+```
+
 ---
 
 ## 📁 Estructura del proyecto
 
 ```text
-tt2_drowsiness_jetson/
+tt2_drowsiness_jetson_v2/
 ├── main.py                         # Punto de entrada y argumentos CLI
 ├── config.json                     # Configuración principal
 ├── DOCUMENTACION_PROYECTO.md       # Documentación técnica completa
 ├── models/                         # Predictor dlib local, no versionado
 ├── scripts/
+│   ├── benchmark_pipeline.py       # Benchmark reproducible cámara + visión
 │   └── configure_pwm2_jetson_nano.sh
 ├── src/
 │   ├── application.py              # Orquestación de la aplicación
@@ -383,7 +442,9 @@ tt2_drowsiness_jetson/
 ├── systemd/
 │   └── tt2-pwm2-pinmux.service
 └── tests/
-    └── test_gpio_controller.py
+    ├── test_calibration.py
+    ├── test_gpio_controller.py
+    └── test_performance.py
 ```
 
 ---
