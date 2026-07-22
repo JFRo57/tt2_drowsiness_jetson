@@ -36,11 +36,15 @@ class CalibrationManager(object):
         self.full_config = config
         self.config = config.get("calibration", {})
         self.clock = clock or time.monotonic
-        self.duration = float(self.config.get("duration_seconds", 4.0))
-        self.min_samples = int(self.config.get("min_samples", 12))
+        self.duration = float(self.config.get("duration_seconds", 5.0))
+        self.min_samples = int(self.config.get("min_samples", 30))
         self.quality_threshold = float(self.config.get("quality_threshold", 0.30))
-        self.min_ear_gap = float(self.config.get("min_ear_gap", 0.015))
-        self.max_ear_std = float(self.config.get("max_ear_std", 0.08))
+        self.min_ear_gap = float(self.config.get("min_ear_gap", 0.020))
+        self.max_ear_std = float(self.config.get("max_ear_std", 0.035))
+        self.max_ear_mad = float(self.config.get("max_ear_mad", 0.025))
+        self.max_profile_overlap_ratio = float(
+            self.config.get("max_profile_overlap_ratio", 0.65)
+        )
         self.max_profile_distance = float(self.config.get("max_profile_distance", 4.0))
         self.feature_scales = dict(self.DEFAULT_SCALES)
         self.feature_scales.update(self.config.get("feature_scales", {}))
@@ -100,7 +104,9 @@ class CalibrationManager(object):
         }
 
         if profile == "OPEN" and not self.model_ready:
-            legacy_threshold = max(0.15, min(0.32, summary["ear"]["median"] * 0.72))
+            # Umbral provisional relativo a la anatomia de la persona. Evita
+            # un limite absoluto alto que perjudique ojos naturalmente pequenos.
+            legacy_threshold = max(0.08, min(0.34, summary["ear"]["median"] * 0.72))
             result["ear_threshold"] = legacy_threshold
             self.result_threshold = legacy_threshold
         elif self.model_ready:
@@ -126,7 +132,9 @@ class CalibrationManager(object):
                     continue
                 weight = float(self.FEATURE_WEIGHTS[feature])
                 fixed_scale = max(1e-6, float(self.feature_scales[feature]))
-                observed_scale = float(summary[feature].get("std", 0.0)) * 2.0
+                observed_scale = float(
+                    summary[feature].get("robust_std", summary[feature].get("std", 0.0))
+                ) * 2.0
                 scale = max(fixed_scale, observed_scale)
                 delta = (float(sample[feature]) - float(summary[feature]["median"])) / scale
                 weighted_total += weight * delta * delta
@@ -158,6 +166,8 @@ class CalibrationManager(object):
             "calibration_profiles": " ".join(status),
             "drowsy_ear_threshold": self.thresholds.get("drowsy_ear_threshold"),
             "calibrated_ear_threshold": self.thresholds.get("ear_threshold"),
+            "calibrated_ear_open_threshold": self.thresholds.get("ear_open_threshold"),
+            "calibration_valid_samples": len(self.samples) if self.active else 0,
         }
 
     def _extract_sample(self, metrics, require_quality):
@@ -165,6 +175,8 @@ class CalibrationManager(object):
             return None
         quality = float(metrics.get("quality", 0.0))
         if require_quality and quality < self.quality_threshold:
+            return None
+        if require_quality and metrics.get("eye_reliable") is False:
             return None
         ear = metrics.get("ear")
         if ear is None or float(ear) <= 0.0:
@@ -185,15 +197,29 @@ class CalibrationManager(object):
             if not values:
                 continue
             arr = np.array(values, dtype=float)
+            median = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - median)))
             summary[feature] = {
-                "median": float(np.median(arr)),
+                "median": median,
                 "std": float(np.std(arr)),
+                "mad": mad,
+                "robust_std": 1.4826 * mad,
+                "p10": float(np.percentile(arr, 10)),
+                "p25": float(np.percentile(arr, 25)),
+                "p75": float(np.percentile(arr, 75)),
+                "p90": float(np.percentile(arr, 90)),
             }
         if "ear" not in summary:
             return None
         ear_median = summary["ear"]["median"]
-        ear_std = summary["ear"]["std"]
-        if ear_median < 0.05 or ear_median > 0.50 or ear_std > self.max_ear_std:
+        ear_robust_std = summary["ear"]["robust_std"]
+        ear_mad = summary["ear"]["mad"]
+        if (
+            ear_median < 0.05
+            or ear_median > 0.50
+            or ear_robust_std > self.max_ear_std
+            or ear_mad > self.max_ear_mad
+        ):
             return None
         gazes = [sample.get("gaze") for sample in samples if sample.get("gaze")]
         summary["gaze"] = max(set(gazes), key=gazes.count) if gazes else "DESCONOCIDA"
@@ -217,9 +243,36 @@ class CalibrationManager(object):
             self.message = "Perfiles EAR no separables: repita O, S y D con estados mas definidos"
             return
 
+        adjacent = (("OPEN", "DROWSY"), ("DROWSY", "ASLEEP"))
+        for upper_name, lower_name in adjacent:
+            upper = self.profiles[upper_name]["ear"]
+            lower = self.profiles[lower_name]["ear"]
+            median_gap = upper["median"] - lower["median"]
+            overlap = max(0.0, lower["p75"] - upper["p25"])
+            if overlap > median_gap * self.max_profile_overlap_ratio:
+                self.model_ready = False
+                self.thresholds = {}
+                self.message = "Perfiles EAR solapados: repita O, S y D sin mover la cabeza"
+                return
+
+        asleep_gap = drowsy_ear - asleep_ear
+        configured_hysteresis = float(
+            self.full_config.get("stability", {}).get("ear_hysteresis", 0.012)
+        )
+        adaptive_hysteresis = max(0.006, min(0.030, asleep_gap * 0.20))
+        ear_hysteresis = max(configured_hysteresis, adaptive_hysteresis)
+        ear_threshold = (drowsy_ear + asleep_ear) / 2.0
+
         self.thresholds = {
             "drowsy_ear_threshold": (open_ear + drowsy_ear) / 2.0,
-            "ear_threshold": (drowsy_ear + asleep_ear) / 2.0,
+            "ear_threshold": ear_threshold,
+            "ear_open_threshold": min(drowsy_ear, ear_threshold + ear_hysteresis),
+            "open_ear_reference": open_ear,
+            "drowsy_ear_reference": drowsy_ear,
+            "asleep_ear_reference": asleep_ear,
         }
+        open_pitch = self.profiles["OPEN"].get("pitch")
+        if open_pitch is not None:
+            self.thresholds["open_pitch_reference"] = open_pitch["median"]
         self.model_ready = True
         self.message = "Calibracion completa: O/S/D listos"

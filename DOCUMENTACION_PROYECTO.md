@@ -16,8 +16,12 @@ Se construyo una aplicacion modular en Python con los siguientes componentes:
   entrega BGRx directo y publica el ultimo frame desde un hilo separado.
 - `src/face_detector.py`: selecciona dlib CNN CUDA, OpenCV DNN CUDA FP16 o
   dlib HOG CPU, con fallback automatico y telemetria del backend activo.
-- `src/face_analyzer.py`: estima 68 puntos faciales y calcula EAR, MAR, pose de cabeza, direccion de mirada, brillo y calidad de deteccion.
-- `src/fatigue_detector.py`: convierte las metricas faciales en estados del sistema como `NORMAL`, `PARPADEO`, `POSIBLE_SOMNOLENCIA`, `ALERTA`, `ALERTA_CRITICA` y `ROSTRO_NO_DETECTADO`.
+- `src/face_analyzer.py`: estima 68 puntos faciales, estabiliza ROI y landmarks,
+  calcula EAR crudo/filtrado, MAR, pose, mirada, brillo y confiabilidad ocular.
+- `src/fatigue_detector.py`: aplica histéresis, confirmación temporal y retención
+  de observaciones no confiables antes de convertir las métricas en estados
+  como `NORMAL`, `PARPADEO`, `POSIBLE_SOMNOLENCIA`, `ALERTA`,
+  `ALERTA_CRITICA` y `ROSTRO_NO_DETECTADO`.
 - `src/calibration.py`: captura tres perfiles personales de sesion (ojos
   abiertos, posible somnolencia y dormido), calcula umbrales EAR robustos y
   clasifica cada frame usando EAR, MAR, pose y mirada.
@@ -53,6 +57,17 @@ Los ultimos cambios del proyecto quedaron concentrados principalmente en la logi
 - La deteccion facial usa GPU CUDA y cambia automaticamente a un respaldo si
   el backend preferido no puede arrancar o falla durante la ejecucion.
 - La interfaz muestra backend activo, aceleracion GPU y causa del fallback.
+- Se estabilizaron el ROI y los landmarks para evitar reajustes bruscos por
+  redetección o vibración del vehículo.
+- Se separaron EAR crudo y filtrado, con mediana, histéresis y confirmaciones
+  temporales distintas para cierre y apertura.
+- Se agregó validación ocular por nitidez, tamaño, simetría entre ojos, calidad
+  facial y yaw. Los cuadros no confiables se retienen brevemente y no se
+  interpretan automáticamente como ojos abiertos.
+- La calibración O/S/D dura 5 segundos por perfil, usa estadísticas robustas y
+  rechaza perfiles inestables, desordenados o excesivamente superpuestos.
+- La interfaz muestra umbrales de cierre/apertura y diagnóstico de señal ocular
+  para poder distinguir somnolencia real de desenfoque u oclusión.
 
 Nota: `switch.debounce_ms` y `switch.center_mode` ya existen en `config.json`. En la implementacion actual la lectura del switch usa entradas con pull-up/pull-down de Jetson.GPIO, pero no aplica una rutina de debounce por software; la posicion central se interpreta como `MAINTENANCE`, que coincide con el valor configurado actualmente.
 
@@ -68,7 +83,8 @@ flowchart LR
     Backend --> FaceAnalyzer[FaceAnalyzer 68 landmarks]
     Backend -. fallback .-> Reserva[OpenCV CUDA FP16 o HOG CPU]
     Reserva --> FaceAnalyzer
-    FaceAnalyzer --> FatigueDetector[FatigueDetector]
+    FaceAnalyzer --> Stability[ROI y landmarks estabilizados<br/>EAR crudo filtrado y calidad ocular]
+    Stability --> FatigueDetector[FatigueDetector]
     Switch[Switch 3 estados] --> GPIOController[GPIOController]
     GPIOController --> ModeController[ModeController]
     ModeController --> App
@@ -92,9 +108,11 @@ flowchart TD
     F -->|EMERGENCY| G[Estado PARO_EMERGENCIA]
     F -->|MAINTENANCE| H[Estado MANTENIMIENTO]
     F -->|AUTOMATIC| I[Capturar frame]
-    I --> J[Detectar rostro y landmarks]
-    J --> K[Calcular EAR MAR pose mirada calidad brillo]
-    K --> L[Evaluar fatiga y transiciones]
+    I --> J[Detectar rostro y landmarks crudos]
+    J --> K[Estabilizar ROI y landmarks]
+    K --> Q[Calcular metricas y validar señal ocular]
+    Q --> R[Filtrar EAR y confirmar cierre o apertura]
+    R --> L[Evaluar fatiga y transiciones]
     G --> M[Actualizar alertas]
     H --> M
     L --> M
@@ -112,18 +130,25 @@ flowchart TD
    de `nvvidconv` y captura frames en un hilo separado.
 4. En cada ciclo, la aplicacion lee el modo activo, toma el frame mas reciente y lo analiza.
 5. `FaceAnalyzer` convierte BGRx a gris y localiza el rostro con el backend
-   acelerado disponible; los 68 landmarks y las metricas no cambian.
+   acelerado disponible. Las redetecciones se fusionan con el ROI seguido y
+   los landmarks se separan en traslación global y forma local para reducir
+   saltos sin impedir que el seguimiento acompañe movimientos reales.
 6. Si hay rostro, se calculan:
-   - EAR: relacion de apertura ocular.
+   - EAR crudo y EAR filtrado: relación de apertura ocular antes y después de
+     la mediana temporal.
    - MAR: relacion de apertura de boca.
    - PERCLOS: porcentaje temporal de ojos cerrados en una ventana movil.
    - Pose de cabeza: pitch, yaw y roll.
    - Mirada estimada: centro, izquierda, derecha, arriba, abajo o desconocida.
-   - Calidad de deteccion y brillo medio.
-7. `FatigueDetector` evalua las metricas y cambia el estado del sistema segun los umbrales configurados.
-8. `AlertController` activa LEDs y tonos del buzzer pasivo segun el estado.
-9. `PresentationUI` dibuja el video, los landmarks y el panel de informacion.
-10. Al salir, se apagan salidas GPIO, se libera la camara, se cierra el logger y se destruyen ventanas OpenCV.
+   - Calidad de detección, nitidez ocular, diferencia entre ambos ojos y brillo.
+7. La señal ocular se valida por calidad, tamaño, nitidez, simetría y yaw. Una
+   observación válida pasa por histéresis y confirmación temporal; una inválida
+   conserva brevemente el último estado en lugar de forzar ojos abiertos.
+8. `FatigueDetector` evalúa las métricas y cambia el estado del sistema según
+   los umbrales personales o de respaldo.
+9. `AlertController` activa LEDs y tonos del buzzer pasivo segun el estado.
+10. `PresentationUI` dibuja el video, los landmarks y el panel de informacion.
+11. Al salir, se apagan salidas GPIO, se libera la camara, se cierra el logger y se destruyen ventanas OpenCV.
 
 ## Estados principales
 
@@ -168,11 +193,11 @@ stateDiagram-v2
         CAL --> EVAL: captura terminada (valida o invalida)
 
         EVAL --> NOFACE: sin rostro >= 2.0 s
-        EVAL --> BLINK: ojos cerrados < 0.45 s
+        EVAL --> BLINK: cierre confirmado >= 0.08 s<br/>y menor al nivel preventivo
         EVAL --> CRITICAL: cierre o ASLEEP >= 1.60 s
         EVAL --> ALERT: cierre o ASLEEP >= 0.85 s<br/>o PERCLOS >= 0.35
         EVAL --> POSSIBLE: cierre o ASLEEP >= 0.45 s<br/>DROWSY >= 0.80 s<br/>PERCLOS >= 0.25<br/>bostezo, cabeceo o mirada desviada
-        EVAL --> NORMAL: indicadores dentro de rango<br/>o perdida de rostro < 2.0 s
+        EVAL --> NORMAL: indicadores dentro de rango<br/>o sin rostro entre 0.25 y 2.0 s
 
         NOFACE --> EVAL: siguiente frame
         BLINK --> EVAL: siguiente frame
@@ -202,6 +227,21 @@ cierre critico, alerta, posible somnolencia, PERCLOS, evidencias secundarias,
 recuperacion y finalmente `NORMAL`. Debido a esta reevaluacion, un estado puede
 saltar directamente a otro si las metricas del frame ya cumplen una condicion
 de mayor prioridad.
+
+Antes de `EVAL` existe una submáquina ocular. El cierre debe permanecer al
+menos `close_confirm_seconds=0.08`; la reapertura debe superar el umbral de
+apertura durante `open_confirm_seconds=0.15`. Los dos umbrales están separados
+por `ear_hysteresis`, por lo que una oscilación alrededor del límite no alterna
+el estado en cada frame. El panel resume esta etapa como `ABIERTO`,
+`CONFIRMANDO_CIERRE`, `CERRADO`, `CONFIRMANDO_APERTURA`, `RETENIDO` o
+`NO_CONFIABLE`.
+
+Un cuadro ocular no confiable o una pérdida de rostro de hasta 0.25 s conserva
+el estado previo y no reinicia un cierre sostenido. Si el rostro continúa
+ausente, el detector vuelve temporalmente a `NORMAL` hasta llegar a 2.0 s,
+cuando entra en `ROSTRO_NO_DETECTADO`. La retención corta evita que una
+vibración puntual cancele un microsueño; no inventa datos durante una oclusión
+prolongada.
 
 Cuando desaparecen las condiciones de riesgo, `recovery_since` se fija una sola
 vez y el nivel anterior se conserva durante `recovery_seconds` (1.0 s en la
@@ -471,7 +511,12 @@ cero. El programa no vuelve automaticamente a `software_pwm`.
 
 ## Manual de uso
 
-Con la interfaz abierta, el panel lateral muestra el estado actual, motivo, EAR, umbral EAR, tiempo de ojos cerrados, PERCLOS, MAR, pose de cabeza, mirada, FPS, estado del buzzer, frecuencia activa y LEDs virtuales.
+Con la interfaz abierta, el panel lateral muestra estado y motivo; **EAR crudo
+y filtrado**; umbrales personales de cierre y apertura; estado de señal ocular;
+nitidez, diferencia EAR entre ojos y confiabilidad; tiempo de ojos cerrados,
+PERCLOS, MAR, pose, mirada, FPS, backend, buzzer y LEDs virtuales. Esta
+telemetría permite saber si una discrepancia proviene de la clasificación o de
+una observación borrosa, asimétrica u ocluida.
 
 Teclas disponibles:
 
@@ -494,11 +539,11 @@ Teclas disponibles:
 Con el vehiculo detenido, la camara en su posicion final y luz estable:
 
 1. Presionar `O` y mirar al frente con ojos abiertos y postura normal durante
-   aproximadamente 4 segundos.
-2. Presionar `S` y representar posible somnolencia durante 4 segundos, con
+   aproximadamente 5 segundos.
+2. Presionar `S` y representar posible somnolencia durante 5 segundos, con
    parpados entrecerrados, expresion relajada e inclinacion ligera.
 3. Presionar `D` y mantener los ojos cerrados junto con la postura de cabeza
-   que se desea reconocer como dormida durante 4 segundos.
+   que se desea reconocer como dormida durante 5 segundos.
 4. Confirmar que el panel muestre `O:OK S:OK D:OK`. El clasificador queda
    activo a partir del siguiente frame.
 
@@ -512,6 +557,16 @@ El panel tambien presenta:
 Las muestras de baja calidad no se guardan. El modelo exige una separacion EAR
 minima y el orden abierto > somnoliento > dormido; un conjunto superpuesto o
 inestable se rechaza para reducir clasificaciones ambiguas.
+
+La calibracion es individual y no asigna umbrales por etnia. Aprende la
+geometria ocular de la persona concreta, incluida la forma del parpado, la
+apertura habitual, asimetrias moderadas, lentes, distancia y postura respecto a
+la camara. Debe repetirse cuando cambie el conductor, la posicion de la camara
+o los lentes.
+
+La calibracion debe realizarse con el vehiculo estacionado. Este sistema es un
+prototipo de asistencia y no sustituye detenerse en un lugar seguro cuando el
+conductor presenta somnolencia.
 
 dlib no cambia ni se reentrena durante este proceso: extrae los landmarks. El
 clasificador personal de sesion utiliza EAR, MAR, pitch, yaw, roll y mirada para
@@ -562,7 +617,14 @@ El archivo `config.json` concentra los parametros del sistema.
 
 ### Fatiga
 
-- `ear_threshold`: umbral base de ojos cerrados.
+Antes de aplicar estos tiempos, la señal ocular usa mediana temporal,
+histéresis y confirmación de estado. Por ello un cuadro aislado no reinicia un
+cierre sostenido.
+
+- `ear_threshold`: umbral de respaldo antes de completar la calibración. Con
+  `use_session_calibration=true`, el límite de cierre se deriva de O/S/D.
+- El umbral de apertura se genera a partir del umbral de cierre y
+  `stability.ear_hysteresis`; no se copia de otro conductor.
 - `prealert_closed_seconds`: segundos para advertencia preventiva.
 - `alert_closed_seconds`: segundos para alerta.
 - `critical_closed_seconds`: segundos para alerta critica.
@@ -573,17 +635,69 @@ El archivo `config.json` concentra los parametros del sistema.
 - `gaze_away_warning_seconds`: tiempo de mirada desviada para advertencia.
 - `no_face_warning_seconds`: tiempo sin rostro para advertencia.
 
+### Estabilidad en vehículo
+
+La sección `stability` controla el rechazo de vibración sin sacrificar la
+detección de cierres reales:
+
+- El ROI proveniente de landmarks se suaviza y la detección periódica se
+  fusiona por IoU y desplazamiento de centro; ya no reemplaza el rectángulo de
+  un solo salto.
+- La traslación global de los landmarks sigue al conductor con rapidez, pero
+  su forma local se filtra para evitar que los puntos "respiren" alrededor de
+  los párpados.
+- `ear_median_window=3` elimina un outlier conservando baja latencia.
+- `ear_hysteresis`, `close_confirm_seconds` y `open_confirm_seconds` forman una
+  máquina ocular con umbrales distintos para cerrar y abrir. La apertura exige
+  más persistencia para que uno o dos cuadros falsos no corten un microsueño.
+- Observaciones borrosas, asimetrías extremas o giros laterales se marcan como
+  no confiables. Durante `unreliable_hold_seconds` se conserva el estado previo
+  en vez de interpretar el cuadro como ojos abiertos.
+- Una pérdida de rostro menor que `face_loss_hold_seconds` tampoco borra una
+  alerta activa.
+
+Valores predeterminados:
+
+| Parámetro | Valor | Función |
+| --- | ---: | --- |
+| `landmark_shape_alpha` | `0.30` | Suavizado de la forma local de landmarks |
+| `landmark_translation_alpha` | `0.75` | Seguimiento rápido de la traslación del rostro |
+| `tracking_rect_alpha` | `0.35` | Suavizado del ROI entre redetecciones |
+| `redetection_rect_alpha` | `0.30` | Fusión gradual del ROI redetectado |
+| `redetection_min_iou` | `0.15` | IoU mínimo para aceptar una redetección coherente |
+| `redetection_max_center_shift` | `0.45` | Desplazamiento relativo máximo del centro |
+| `redetection_miss_tolerance` | `2` | Redetecciones anómalas toleradas antes de sustituir ROI |
+| `ear_median_window` | `3` | Ventana de mediana EAR |
+| `ear_hysteresis` | `0.012` | Separación entre cierre y reapertura |
+| `close_confirm_seconds` | `0.08 s` | Persistencia mínima para confirmar cierre |
+| `open_confirm_seconds` | `0.15 s` | Persistencia mínima para confirmar reapertura |
+| `unreliable_hold_seconds` | `0.25 s` | Retención ante señal ocular no confiable |
+| `face_loss_hold_seconds` | `0.25 s` | Retención ante pérdida breve de rostro |
+| `eye_quality_threshold` | `0.25` | Calidad facial mínima para confiar en los ojos |
+| `min_eye_width_pixels` | `10 px` | Ancho ocular mínimo medible |
+| `min_eye_sharpness` | `12.0` | Nitidez mínima de la región ocular |
+| `max_eye_ear_difference` | `0.12` | Diferencia EAR absoluta máxima entre ojos |
+| `max_eye_ear_difference_ratio` | `0.65` | Diferencia EAR relativa máxima entre ojos |
+| `max_eye_yaw_degrees` | `32°` | Giro lateral máximo para evaluar apertura |
+
 ### Calibracion
 
-- `duration_seconds`: duracion de captura de cada perfil.
-- `min_samples`: minimo de frames validos por perfil.
-- `quality_threshold`: calidad facial minima aceptada.
-- `min_ear_gap`: separacion EAR minima entre perfiles vecinos.
-- `max_ear_std`: dispersion EAR maxima permitida dentro de un perfil.
-- `max_profile_distance`: distancia maxima para aceptar una clasificacion.
-- `profile_min_confidence`: confianza minima usada por el detector temporal.
-- `profile_warning_seconds`: persistencia del perfil somnoliento antes de avisar.
-- `feature_scales`: normalizacion de EAR, MAR y angulos de pose.
+| Parámetro | Valor | Función |
+| --- | ---: | --- |
+| `duration_seconds` | `5.0 s` | Duración de O, S y D por separado |
+| `min_samples` | `30` | Mínimo de cuadros válidos por perfil |
+| `quality_threshold` | `0.30` | Calidad facial mínima aceptada |
+| `min_ear_gap` | `0.02` | Separación EAR mínima entre perfiles vecinos |
+| `max_ear_std` | `0.035` | Desviación estándar EAR máxima |
+| `max_ear_mad` | `0.025` | Desviación absoluta mediana máxima |
+| `max_profile_overlap_ratio` | `0.65` | Solapamiento máximo entre distribuciones EAR |
+| `max_profile_distance` | `4.0` | Distancia normalizada máxima de clasificación |
+| `profile_min_confidence` | `0.35` | Confianza mínima usada por el detector temporal |
+| `profile_warning_seconds` | `0.80 s` | Persistencia de perfil somnoliento para advertir |
+
+`feature_scales` normaliza EAR (`0.04`), MAR (`0.15`), pitch (`12°`), yaw
+(`15°`) y roll (`15°`). Las estadísticas centrales se calculan con medianas y
+MAD/percentiles para que unos pocos cuadros atípicos no definan el umbral.
 
 ### GPIO
 
@@ -761,11 +875,12 @@ no aporta una observacion nueva.
    sin rostro y cada 12 cuando ya existe seguimiento. Si no esta disponible,
    se activa OpenCV DNN CUDA FP16 y finalmente HOG CPU. Un fallo en ejecucion
    tambien provoca el cambio, sin derribar la aplicacion.
-5. Entre redetecciones, el rectangulo se actualiza desde los landmarks del
-   cuadro anterior; esto resulto mas ligero que el tracker de correlacion en
-   este pipeline.
-6. EAR y MAR se calculan en cada analisis. Pose y mirada se calculan cada 2
-   analisis y reutilizan su ultimo valor.
+5. Entre redetecciones, el rectangulo se actualiza desde landmarks y se
+   suaviza. La nueva deteccion se fusiona con el ROI previo para eliminar el
+   reajuste brusco observado periodicamente.
+6. EAR y MAR se calculan en cada analisis. El EAR pasa por mediana de tres
+   muestras, histeresis y confirmacion temporal; pose y mirada se calculan cada
+   2 analisis y reutilizan su ultimo valor.
 7. CLAHE se aplica solo con luminosidad menor de 75 o mayor de 205. La tabla
    gamma, matrices de pose y buffers de interfaz se conservan entre cuadros.
 8. PERCLOS mantiene acumuladores temporales y poda segmentos de la ventana; ya
@@ -796,6 +911,14 @@ no aporta una observacion nueva.
   "frame_wait_timeout_seconds": 0.1,
   "opencv_threads": 2,
   "opencv_optimized": true
+},
+"stability": {
+  "ear_median_window": 3,
+  "ear_hysteresis": 0.012,
+  "close_confirm_seconds": 0.08,
+  "open_confirm_seconds": 0.15,
+  "unreliable_hold_seconds": 0.25,
+  "face_loss_hold_seconds": 0.25
 }
 ```
 
@@ -804,11 +927,11 @@ no aporta una observacion nueva.
 Benchmark en la Jetson Nano de desarrollo con la camara CSI activa,
 procesamiento 640x360 y escena sin rostro:
 
-| Metrica | V2 | V3 | Diferencia |
-| --- | ---: | ---: | ---: |
-| FPS del analizador | 29.328 | 29.189 | limitado por camara a ~30 FPS |
-| Latencia media | 11.267 ms | 10.526 ms | -6.6 % |
-| Latencia p95 | 33.328 ms | 29.841 ms | -10.5 % |
+| Metrica V3 | Resultado |
+| --- | ---: |
+| FPS del analizador | 29.189, limitado por camara a ~30 FPS |
+| Latencia media | 10.526 ms |
+| Latencia p95 | 29.841 ms |
 
 Microbenchmark aislado del detector a media escala:
 
@@ -839,6 +962,12 @@ python3 -m json.tool config.json >/dev/null
 tegrastats
 ```
 
+Estado actual: **31 pruebas unitarias aprobadas**. Entre los casos cubiertos
+están perfiles O/S/D válidos e inválidos, diferencias anatómicas de apertura,
+microsueño sin reinicio por aperturas espurias, vibración/desenfoque simulado,
+pérdida breve de rostro, histéresis, PERCLOS, GPIO/PWM y rendimiento. Estas
+pruebas no sustituyen la validación física con cámara y vehículo.
+
 Opcionalmente, para una sesion de rendimiento maximo:
 
 ```bash
@@ -863,8 +992,16 @@ lugar. TensorRT requiere un modelo ONNX compatible y validacion independiente.
 - El primer arranque CUDA tarda varios segundos mientras crea el contexto y
   calienta el backend; no representa la latencia estable por frame.
 - La calibracion es de sesion y debe repetirse al reiniciar.
+- La calibración debe realizarse con el vehículo detenido; movimiento, vibración
+  o cambios de luz durante O/S/D pueden invalidar los perfiles.
 - La deteccion facial a media escala exige que el rostro tenga un tamano
   suficiente; la UI permite comprobar calidad y rectangulo en tiempo real.
+- El predictor dlib de 68 landmarks puede degradarse con oclusión, reflejos,
+  desenfoque intenso o pose extrema. V3 retiene o rechaza esos cuadros, pero no
+  puede reconstruir una apertura ocular que la cámara no observa.
+- Las pruebas unitarias y benchmarks no constituyen certificación automotriz.
+  Antes de uso real se requieren ensayos controlados de día/noche, con lentes,
+  distintos conductores, montaje final y perfiles de vibración del vehículo.
 - TensorRT nativo no se activa con el SSD Caffe actual por incompatibilidad del parser 8.2.
 
 ## Problemas comunes
@@ -890,9 +1027,14 @@ Si se mueve el archivo, actualizar `dlib.predictor_path` en `config.json`.
 
 - Completar las calibraciones `O`, `S` y `D` hasta que el panel muestre
   `O:OK S:OK D:OK`.
-- Ajustar `ear_threshold`.
-- Mejorar iluminacion y posicion de camara.
-- Revisar que el rostro ocupe suficiente area del frame.
+- Comparar EAR crudo/filtrado y revisar `Señal ocular`, nitidez y diferencia
+  entre ojos. `NO_CONFIABLE` frecuente apunta a imagen o pose, no a somnolencia.
+- Mejorar iluminación, fijación de cámara y tamaño del rostro en el frame;
+  revisar reflejos en lentes y giro lateral.
+- Repetir O/S/D con el vehículo detenido si cambió conductor, cámara, asiento
+  o lentes.
+- Ajustar `stability` solo con evidencia registrada. No modificar
+  `ear_threshold` como primera medida: es el respaldo previo a la calibración.
 
 ### GPIO no responde
 

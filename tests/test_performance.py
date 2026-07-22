@@ -1,5 +1,6 @@
 import unittest
 
+import dlib
 import numpy as np
 
 from src.application import default_config
@@ -76,10 +77,22 @@ class VisionSchedulingTests(unittest.TestCase):
         self.assertEqual(20.0, config["performance"]["target_analysis_fps"])
         self.assertEqual("BGRx", config["camera"]["output_format"])
         self.assertEqual("auto", config["face_detection"]["backend"])
+        self.assertEqual(3, config["stability"]["ear_median_window"])
+        self.assertGreater(config["stability"]["open_confirm_seconds"], config["stability"]["close_confirm_seconds"])
         self.assertEqual(
             ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"],
             config["face_detection"]["backend_order"],
         )
+
+    def test_redetection_rectangle_is_fused_instead_of_replaced(self):
+        previous = dlib.rectangle(10, 10, 110, 110)
+        detected = dlib.rectangle(20, 20, 120, 120)
+
+        fused = FaceAnalyzer._blend_rect(previous, detected, 0.30, (360, 640))
+
+        self.assertEqual((13, 13, 113, 113), (
+            fused.left(), fused.top(), fused.right(), fused.bottom()
+        ))
 
     def test_camera_pipeline_uses_direct_bgrx_without_cpu_videoconvert(self):
         pipeline = CameraManager(default_config()["camera"]).build_pipeline()

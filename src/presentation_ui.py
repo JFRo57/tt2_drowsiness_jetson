@@ -60,7 +60,7 @@ class PresentationUI(object):
 
     def _add_panel(self, frame, m, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
         panel_w = 460
-        h = max(frame.shape[0], 970)
+        h = max(frame.shape[0], 1050)
         shape = (h, frame.shape[1] + panel_w, 3)
         if self._panel_canvas is None or self._panel_shape != shape:
             self._panel_canvas = np.empty(shape, dtype=np.uint8)
@@ -85,8 +85,14 @@ class PresentationUI(object):
             "Motivo: %s" % detector.reason[:38],
             "Rostro detectado: %s" % ("SI" if m.get("face_detected") else "NO"),
             "Calidad: %.2f" % m.get("quality", 0.0),
-            "EAR izq/der/prom: %.3f / %.3f / %.3f" % (m.get("left_ear", 0.0), m.get("right_ear", 0.0), m.get("ear", 0.0)),
-            "Umbral EAR dormido: %.3f" % detector.ear_threshold,
+            "EAR izq/der/crudo: %.3f / %.3f / %.3f" % (m.get("left_ear", 0.0), m.get("right_ear", 0.0), m.get("ear_raw", m.get("ear", 0.0))),
+            "EAR filtrado: %s" % self._fmt3(m.get("ear_filtered", m.get("ear"))),
+            "Senal ocular: %s (%s)" % (m.get("eye_signal_status", "--"), "OK" if m.get("eye_decision_reliable") else "NO CONFIABLE"),
+            "Nitidez/diferencia: %.1f / %.3f" % (m.get("eye_sharpness", 0.0), m.get("eye_ear_difference", 0.0)),
+            "Umbral cerrar/abrir: %.3f / %.3f" % (
+                detector.ear_threshold,
+                getattr(detector, "ear_open_threshold", detector.ear_threshold),
+            ),
             "Umbral EAR somnolencia: %s" % self._fmt3(detector.drowsy_ear_threshold),
             "Perfiles: %s" % m.get("calibration_profiles", "O:-- S:-- D:--"),
             "Perfil detectado: %s %.0f%% / %.1f s" % (
@@ -94,7 +100,7 @@ class PresentationUI(object):
                 float(m.get("calibrated_profile_confidence", 0.0)) * 100.0,
                 float(m.get("calibrated_profile_seconds", 0.0)),
             ),
-            "Ojos cerrados: %.2f s" % m.get("closed_seconds", 0.0),
+            "Ojos cerrados estables: %.2f s" % m.get("closed_seconds", 0.0),
             "Parpadeos recientes: %s" % m.get("blink_count_recent", 0),
             "PERCLOS: %.1f %%" % (m.get("perclos", 0.0) * 100.0),
             "MAR: %.3f  Bostezo: %s" % (m.get("mar", 0.0), "SI" if m.get("possible_yawn") else "NO"),
@@ -151,7 +157,7 @@ class PresentationUI(object):
         cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 150), (15, 15, 15), -1)
         cv2.putText(view, "CALIBRANDO: %s" % labels.get(target, target), (40, 98),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
-        cv2.putText(view, "Mantenga la pose hasta completar la barra", (40, 124),
+        cv2.putText(view, "Vehiculo detenido; no mueva la cabeza", (40, 124),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1)
         cv2.rectangle(view, (40, 134), (40 + width, 145), (90, 90, 90), 1)
         cv2.rectangle(view, (40, 134), (40 + int(width * progress), 145), (0, 220, 255), -1)

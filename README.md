@@ -30,12 +30,17 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
   **BGRx directa**, sin `videoconvert` en CPU.
 - Detección facial primaria con **dlib CNN sobre CUDA**.
 - Respaldos automáticos con **OpenCV DNN CUDA FP16** y **dlib HOG CPU**.
-- Estimación de **68 landmarks** con dlib, conservando la calibración original.
+- Estimación de **68 landmarks** con dlib y estabilización temporal contra
+  vibraciones del vehículo.
 - Cálculo de **EAR**, **MAR**, **PERCLOS**, mirada y pose de cabeza.
 - Detección temporal de ojos cerrados, bostezos, cabeceo y pérdida de rostro.
 - Estados escalonados: normal, prealerta, alerta y alerta crítica.
 - Calibración supervisada de tres perfiles personales: **ojos abiertos**,
   **posible somnolencia** y **dormido**, durante la sesión.
+- Umbrales EAR derivados de cada persona, sin asumir un tamaño o forma ocular
+  universal.
+- Mediana temporal, histéresis y confirmación de apertura para que cuadros
+  borrosos o aperturas espurias no interrumpan un microsueño.
 - Interfaz OpenCV con métricas, landmarks, FPS y estado del hardware.
 - Modos de operación **AUTOMATIC**, **MAINTENANCE** y **EMERGENCY**.
 - Ejecución con GPIO físico o en modo completamente simulado.
@@ -43,13 +48,14 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - PWM2 nativo para mantener el tono estable bajo carga de OpenCV y dlib.
 - Pipeline **latest-only**: nunca procesa dos veces el mismo cuadro ni acumula
   video atrasado.
-- Detección facial a media escala, seguimiento ligero por landmarks y
-  redetección periódica.
+- Detección facial a media escala, ROI suavizado y fusión de redetecciones sin
+  saltos bruscos.
 - CLAHE adaptativo, pose/mirada desacopladas y PERCLOS incremental.
 - Objetivo de análisis configurable de **20 FPS** y telemetría por etapa en la
   interfaz.
 - Registro opcional de transiciones de estado en CSV.
-- Pruebas unitarias de calibración, estados, GPIO/PWM y ruta optimizada.
+- Pruebas unitarias de calibración anatómica, microsueños, vibración simulada,
+  estados, GPIO/PWM y ruta optimizada.
 
 ---
 
@@ -78,7 +84,8 @@ flowchart LR
     GPU --> FACE[dlib 68 landmarks]
     GPU -. fallo .-> FALLBACK[OpenCV CUDA FP16 / HOG CPU]
     FALLBACK --> FACE
-    FACE --> FATIGUE[FatigueDetector]
+    FACE --> STABLE[ROI + landmarks + EAR robusto]
+    STABLE --> FATIGUE[FatigueDetector]
     FATIGUE --> ALERT[AlertController]
     SWITCH[Switch de 3 estados] --> GPIO[GPIOController]
     ALERT --> GPIO
@@ -103,7 +110,8 @@ la versión base. El trabajo se reduce en los lugares de mayor costo:
   al dibujar la interfaz y no existe en modo headless.
 - Detección CUDA a escala `0.5`, cada 3 análisis durante búsqueda y cada 12 con
   un rostro seguido, con cambio automático a un backend de respaldo si falla.
-- Seguimiento del ROI mediante landmarks entre redetecciones.
+- Seguimiento del ROI mediante landmarks suavizados y fusión gradual de cada
+  redetección CUDA.
 - Pose y mirada cada 2 análisis, reutilizando el último valor válido.
 - CLAHE únicamente cuando la luminosidad sale del rango configurado.
 - Escrituras LED agrupadas, panel gráfico reutilizable y PERCLOS incremental.
@@ -111,11 +119,11 @@ la versión base. El trabajo se reduce en los lugares de mayor costo:
 Benchmark realizado en esta Jetson Nano, cámara CSI a procesamiento
 **640×360**, escena sin rostro:
 
-| Métrica | V2 | V3 acelerada | Cambio |
-| :--- | ---: | ---: | ---: |
-| FPS del analizador | 29.328 | 29.189 | **límite de cámara (~30 FPS)** |
-| Latencia media | 11.267 ms | 10.526 ms | **−6.6 %** |
-| Latencia p95 | 33.328 ms | 29.841 ms | **−10.5 %** |
+| Métrica V3 | Resultado |
+| :--- | ---: |
+| FPS del analizador | 29.189, limitado por cámara a ~30 FPS |
+| Latencia media | 10.526 ms |
+| Latencia p95 | 29.841 ms |
 
 Microbenchmark del detector, a media escala y sobre la misma Nano:
 
@@ -350,11 +358,11 @@ python3 main.py --gpio-self-test
 Realiza la calibración con el vehículo detenido, la cámara en su posición final
 y una iluminación similar a la de uso:
 
-1. Presiona `O` y permanece aproximadamente 4 segundos mirando al frente, con
+1. Presiona `O` y permanece aproximadamente 5 segundos mirando al frente, con
    los ojos abiertos y una postura normal.
-2. Presiona `S` y simula posible somnolencia durante 4 segundos: párpados
+2. Presiona `S` y simula posible somnolencia durante 5 segundos: párpados
    entrecerrados, expresión relajada y una inclinación ligera y natural.
-3. Presiona `D` y mantén durante 4 segundos los ojos cerrados y la postura de
+3. Presiona `D` y mantén durante 5 segundos los ojos cerrados y la postura de
    cabeza que se desea reconocer como dormido.
 4. Comprueba en el panel que aparezca `O:OK S:OK D:OK`. A partir de ese
    momento se muestran el perfil detectado, su confianza y su duración.
@@ -362,6 +370,15 @@ y una iluminación similar a la de uso:
 Las muestras con baja calidad se descartan. Los valores EAR deben quedar
 separados en el orden abierto > somnoliento > dormido; si se superponen, el
 sistema rechaza el conjunto para evitar un clasificador ambiguo.
+
+La calibración es **individual**, no étnica: aprende la apertura ocular y la
+postura de esa persona concreta. Esto cubre diferencias de párpado, tamaño de
+ojo, lentes, distancia a cámara y posición habitual sin asignar umbrales por
+origen. Debe repetirse si cambia el conductor, la cámara o los lentes.
+
+> **Seguridad:** calibra siempre con el vehículo estacionado. Este proyecto es
+> un prototipo de asistencia; una alarma no vuelve seguro continuar conduciendo
+> con sueño y no sustituye detenerse en un lugar seguro.
 
 **dlib no se reentrena:** continúa extrayendo los 68 landmarks. El clasificador
 de sesión combina **EAR, MAR, pitch, yaw, roll y mirada** para comparar cada
@@ -417,6 +434,20 @@ Para habilitar hardware real:
 Consulta [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md) antes de
 modificar umbrales temporales o parámetros de rendimiento.
 
+Los parámetros de `stability` controlan la robustez dentro del vehículo:
+
+- `landmark_shape_alpha` y `landmark_translation_alpha` separan el suavizado de
+  forma del seguimiento del movimiento global.
+- `tracking_rect_alpha` y `redetection_rect_alpha` fusionan el ROI en el tiempo.
+- `ear_median_window=3` elimina un outlier manteniendo baja latencia.
+- `ear_hysteresis` separa los umbrales de cerrar y volver a abrir.
+- `close_confirm_seconds=0.08` confirma rápido el cierre;
+  `open_confirm_seconds=0.15` exige una apertura sostenida.
+- `unreliable_hold_seconds` y `face_loss_hold_seconds` conservan brevemente el
+  estado ante desenfoque o pérdida de rostro por vibración.
+- `min_eye_sharpness`, `max_eye_ear_difference` y `max_eye_yaw_degrees`
+  determinan cuándo una observación ocular es confiable.
+
 ---
 
 ## 🚨 Niveles de alerta
@@ -449,6 +480,11 @@ python3 -m json.tool config.json >/dev/null
 
 Las pruebas GPIO unitarias utilizan un sysfs temporal y no activan el buzzer
 físico. Para validar el hardware utiliza `--gpio-self-test`.
+
+El estado validado de V3 es de **31 pruebas unitarias aprobadas**. La suite
+cubre calibración personal y rechazo de perfiles superpuestos, histéresis y
+confirmación ocular, microsueños, cuadros no confiables, pérdida breve de
+rostro, vibración simulada, PERCLOS, estados, GPIO/PWM y la ruta optimizada.
 
 Para medir exclusivamente cámara y visión, sin interfaz ni GPIO:
 
@@ -538,8 +574,16 @@ reposo debe ser **HIGH**, implementado como PWM habilitado al 100 %.
 
 - Completa los tres perfiles con `O`, `S` y `D` hasta ver
   `O:OK S:OK D:OK`.
-- Mejora la iluminación y el encuadre.
-- Revisa `ear_threshold`, PERCLOS y los umbrales temporales.
+- Compara en el panel **EAR crudo** y **EAR filtrado**, y revisa el estado de
+  señal ocular. `RETENIDO` ocasional es normal; `NO_CONFIABLE` frecuente indica
+  desenfoque, giro lateral, oclusión o encuadre insuficiente.
+- Si la nitidez ocular es baja, fija mejor la cámara, mejora la iluminación y
+  reduce reflejos en lentes antes de modificar umbrales.
+- Repite la calibración con el vehículo detenido cuando cambien conductor,
+  cámara, asiento o lentes.
+- Ajusta `stability` únicamente después de observar o registrar el problema.
+  No copies `ear_threshold` entre personas ni lo uses como primera corrección:
+  con `use_session_calibration=true` es solo el respaldo previo a calibrar.
 
 ---
 

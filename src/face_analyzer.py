@@ -67,6 +67,53 @@ class FaceAnalyzer(object):
         self.pose_interval = max(1, int(dcfg.get("pose_interval_frames", 2)))
         self.gaze_interval = max(1, int(dcfg.get("gaze_interval_frames", 2)))
 
+        # Estabilizacion temporal para una camara instalada en un vehiculo. La
+        # traslacion global sigue al rostro con rapidez, mientras la forma de
+        # los landmarks y el tamano del ROI se suavizan con mas fuerza.
+        scfg = config.get("stability", {})
+        self.landmark_shape_alpha = self._clamp01(
+            scfg.get("landmark_shape_alpha", 0.30)
+        )
+        self.landmark_translation_alpha = self._clamp01(
+            scfg.get("landmark_translation_alpha", 0.75)
+        )
+        self.tracking_rect_alpha = self._clamp01(
+            scfg.get("tracking_rect_alpha", 0.35)
+        )
+        self.redetection_rect_alpha = self._clamp01(
+            scfg.get("redetection_rect_alpha", 0.30)
+        )
+        self.redetection_min_iou = max(
+            0.0, min(1.0, float(scfg.get("redetection_min_iou", 0.15)))
+        )
+        self.redetection_max_center_shift = max(
+            0.05, float(scfg.get("redetection_max_center_shift", 0.45))
+        )
+        self.redetection_miss_tolerance = max(
+            0, int(scfg.get("redetection_miss_tolerance", 2))
+        )
+        self.min_eye_width_pixels = max(
+            4.0, float(scfg.get("min_eye_width_pixels", 10.0))
+        )
+        self.min_eye_sharpness = max(
+            0.0, float(scfg.get("min_eye_sharpness", 12.0))
+        )
+        self.max_eye_ear_difference = max(
+            0.01, float(scfg.get("max_eye_ear_difference", 0.12))
+        )
+        self.max_eye_ear_difference_ratio = max(
+            0.1, float(scfg.get("max_eye_ear_difference_ratio", 0.65))
+        )
+        self.max_eye_yaw_degrees = max(
+            5.0, float(scfg.get("max_eye_yaw_degrees", 32.0))
+        )
+        ear_window = max(1, int(scfg.get("ear_median_window", 3)))
+        if ear_window % 2 == 0:
+            ear_window += 1
+        self.ear_history = deque(maxlen=ear_window)
+        self.filtered_landmarks = None
+        self.redetection_miss_count = 0
+
         self.gaze_history = deque(maxlen=7)
         self.angle_history = deque(maxlen=5)
         self.last_pose = (None, None, None)
@@ -129,7 +176,7 @@ class FaceAnalyzer(object):
 
         try:
             shape = self.predictor(gray, rect)
-            landmarks = shape_to_np(shape)
+            raw_landmarks = shape_to_np(shape)
         except Exception:
             self._clear_tracking("landmark_error")
             return self._no_face_metrics(
@@ -139,7 +186,7 @@ class FaceAnalyzer(object):
                 locate_done,
             )
 
-        if not self._landmarks_valid(landmarks, gray.shape):
+        if not self._landmarks_valid(raw_landmarks, gray.shape):
             self._clear_tracking("landmarks_invalidos")
             return self._no_face_metrics(
                 brightness,
@@ -148,17 +195,26 @@ class FaceAnalyzer(object):
                 locate_done,
             )
 
-        rect = self._rect_from_landmarks(landmarks, gray.shape)
+        landmark_rect = self._rect_from_landmarks(raw_landmarks, gray.shape)
+        rect = self._blend_rect(
+            self.last_rect,
+            landmark_rect,
+            self.tracking_rect_alpha,
+            gray.shape,
+        )
         self.last_rect = rect
+        landmarks = self._stabilize_landmarks(raw_landmarks)
         landmarks_done = time.perf_counter()
 
+        raw_left_eye = raw_landmarks[LEFT_EYE]
+        raw_right_eye = raw_landmarks[RIGHT_EYE]
         left_eye = landmarks[LEFT_EYE]
         right_eye = landmarks[RIGHT_EYE]
         mouth = landmarks[MOUTH]
-        left_ear = self.eye_aspect_ratio(left_eye)
-        right_ear = self.eye_aspect_ratio(right_eye)
-        ear = (left_ear + right_ear) * 0.5
-        mar = self.mouth_aspect_ratio(mouth)
+        left_ear = self.eye_aspect_ratio(raw_left_eye)
+        right_ear = self.eye_aspect_ratio(raw_right_eye)
+        ear_raw = (left_ear + right_ear) * 0.5
+        mar = self.mouth_aspect_ratio(raw_landmarks[MOUTH])
 
         if self.last_pose[0] is None or self.frame_index % self.pose_interval == 0:
             self.last_pose = self.estimate_head_pose(landmarks, frame.shape)
@@ -167,6 +223,34 @@ class FaceAnalyzer(object):
 
         pitch, yaw, roll = self.last_pose
         quality = self.quality_score(rect, landmarks, gray.shape)
+        eye_sharpness = self.eye_sharpness(gray, raw_left_eye, raw_right_eye)
+        eye_ear_difference = abs(left_ear - right_ear)
+        eye_width = min(
+            point_distance(raw_left_eye[0], raw_left_eye[3]),
+            point_distance(raw_right_eye[0], raw_right_eye[3]),
+        )
+        symmetry_limit = max(
+            0.035,
+            min(
+                self.max_eye_ear_difference,
+                self.max_eye_ear_difference_ratio * max(ear_raw, 1e-6),
+            ),
+        )
+        eye_reliable = bool(
+            quality >= 0.25
+            and eye_width >= self.min_eye_width_pixels
+            and eye_sharpness >= self.min_eye_sharpness
+            and 0.04 <= ear_raw <= 0.60
+            and eye_ear_difference <= symmetry_limit
+            and (yaw is None or abs(float(yaw)) <= self.max_eye_yaw_degrees)
+        )
+        if eye_reliable:
+            self.ear_history.append(ear_raw)
+        if self.ear_history:
+            ordered_ear = sorted(self.ear_history)
+            ear = float(ordered_ear[len(ordered_ear) // 2])
+        else:
+            ear = ear_raw
         finished = time.perf_counter()
         timing = self._timing(
             total_started,
@@ -184,7 +268,11 @@ class FaceAnalyzer(object):
             "mouth": mouth,
             "left_ear": left_ear,
             "right_ear": right_ear,
+            "ear_raw": ear_raw,
             "ear": ear,
+            "eye_reliable": eye_reliable,
+            "eye_sharpness": eye_sharpness,
+            "eye_ear_difference": eye_ear_difference,
             "mar": mar,
             "pitch": pitch,
             "yaw": yaw,
@@ -258,15 +346,37 @@ class FaceAnalyzer(object):
         return self.last_rect
 
     def _detect_face(self, gray, frame=None):
+        previous = self.last_rect
         scale = self.detector_scale
         rects = self.face_detector.detect(gray, frame, scale)
         self.last_detection_source = self.face_detector.last_source
 
         if not rects:
+            if previous is not None and self.redetection_miss_count < self.redetection_miss_tolerance:
+                self.redetection_miss_count += 1
+                self.last_rect = previous
+                self.last_detection_source += "_retencion"
+                return previous
             self._clear_tracking(self.last_detection_source)
             return None
 
-        rect = max(rects, key=rect_area)
+        self.redetection_miss_count = 0
+        if previous is None:
+            rect = max(rects, key=rect_area)
+        else:
+            matched = max(rects, key=lambda candidate: self._rect_iou(previous, candidate))
+            overlap = self._rect_iou(previous, matched)
+            center_shift = self._normalized_center_shift(previous, matched)
+            if overlap >= self.redetection_min_iou or center_shift <= self.redetection_max_center_shift:
+                rect = self._blend_rect(
+                    previous,
+                    matched,
+                    self.redetection_rect_alpha,
+                    gray.shape,
+                )
+                self.last_detection_source += "_fusion"
+            else:
+                rect = max(rects, key=rect_area)
         self.last_rect = rect
         if self.tracking_mode == "correlation":
             self.tracker = dlib.correlation_tracker()
@@ -278,7 +388,68 @@ class FaceAnalyzer(object):
     def _clear_tracking(self, source):
         self.tracker = None
         self.last_rect = None
+        self.filtered_landmarks = None
+        self.ear_history.clear()
+        self.redetection_miss_count = 0
         self.last_detection_source = source
+
+    def reset_eye_filter(self):
+        """Evita mezclar muestras EAR entre dos perfiles de calibracion."""
+        self.ear_history.clear()
+
+    def _stabilize_landmarks(self, points):
+        current = np.asarray(points, dtype=np.float64)
+        if self.filtered_landmarks is None or self.filtered_landmarks.shape != current.shape:
+            self.filtered_landmarks = current.copy()
+        else:
+            previous = self.filtered_landmarks
+            global_shift = np.median(current - previous, axis=0)
+            translated = previous + self.landmark_translation_alpha * global_shift
+            self.filtered_landmarks = translated + self.landmark_shape_alpha * (current - translated)
+        return np.rint(self.filtered_landmarks).astype(np.int32)
+
+    @staticmethod
+    def _clamp01(value):
+        return max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _rect_iou(first, second):
+        left = max(first.left(), second.left())
+        top = max(first.top(), second.top())
+        right = min(first.right(), second.right())
+        bottom = min(first.bottom(), second.bottom())
+        intersection = max(0, right - left) * max(0, bottom - top)
+        union = rect_area(first) + rect_area(second) - intersection
+        return float(intersection) / float(union) if union > 0 else 0.0
+
+    @staticmethod
+    def _normalized_center_shift(first, second):
+        first_x = (first.left() + first.right()) * 0.5
+        first_y = (first.top() + first.bottom()) * 0.5
+        second_x = (second.left() + second.right()) * 0.5
+        second_y = (second.top() + second.bottom()) * 0.5
+        scale = max(
+            1.0,
+            float(first.right() - first.left()),
+            float(first.bottom() - first.top()),
+        )
+        return math.hypot(second_x - first_x, second_y - first_y) / scale
+
+    @staticmethod
+    def _blend_rect(previous, candidate, alpha, shape):
+        if previous is None:
+            return FaceAnalyzer._clamp_rect(
+                candidate.left(), candidate.top(), candidate.right(), candidate.bottom(), shape
+            )
+        alpha = FaceAnalyzer._clamp01(alpha)
+        beta = 1.0 - alpha
+        return FaceAnalyzer._clamp_rect(
+            beta * previous.left() + alpha * candidate.left(),
+            beta * previous.top() + alpha * candidate.top(),
+            beta * previous.right() + alpha * candidate.right(),
+            beta * previous.bottom() + alpha * candidate.bottom(),
+            shape,
+        )
 
     @staticmethod
     def _clamp_rect(left, top, right, bottom, shape):
@@ -335,6 +506,21 @@ class FaceAnalyzer(object):
         c = point_distance(mouth[15], mouth[17])
         d = point_distance(mouth[12], mouth[16])
         return float((a + b + c) / (3.0 * d)) if d > 1e-6 else 0.0
+
+    @staticmethod
+    def eye_sharpness(gray, left_eye, right_eye):
+        points = np.vstack((left_eye, right_eye))
+        x, y, width, height = cv2.boundingRect(points.astype(np.int32))
+        pad_x = max(2, int(width * 0.12))
+        pad_y = max(2, int(height * 0.50))
+        x0 = max(0, x - pad_x)
+        y0 = max(0, y - pad_y)
+        x1 = min(gray.shape[1], x + width + pad_x)
+        y1 = min(gray.shape[0], y + height + pad_y)
+        roi = gray[y0:y1, x0:x1]
+        if roi.size < 64:
+            return 0.0
+        return float(cv2.Laplacian(roi, cv2.CV_32F).var())
 
     def estimate_head_pose(self, points, frame_shape):
         image_points = np.array(

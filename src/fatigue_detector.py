@@ -1,7 +1,6 @@
 import time
 from collections import deque
 
-
 class FatigueDetector(object):
     STATES = (
         "INICIALIZANDO", "CALIBRANDO", "NORMAL", "PARPADEO", "POSIBLE_SOMNOLENCIA",
@@ -10,15 +9,40 @@ class FatigueDetector(object):
     )
     RECOVERY_STATES = ("POSIBLE_SOMNOLENCIA", "ALERTA", "ALERTA_CRITICA")
 
-    def __init__(self, config):
+    def __init__(self, config, clock=None):
         self.config = config["fatigue"]
         self.calibration_config = config.get("calibration", {})
+        self.stability_config = config.get("stability", {})
+        self.clock = clock or time.monotonic
         self.state = "INICIALIZANDO"
         self.previous_state = None
         self.reason = "Inicializando sistema"
         self.ear_threshold = float(self.config["ear_threshold"])
         self.drowsy_ear_threshold = float(self.config.get("drowsy_ear_threshold", self.ear_threshold + 0.04))
-        self.profile_min_confidence = float(self.calibration_config.get("profile_min_confidence", 0.15))
+        self.ear_hysteresis = max(
+            0.002, float(self.stability_config.get("ear_hysteresis", 0.012))
+        )
+        self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
+        ear_window = max(1, int(self.stability_config.get("ear_median_window", 3)))
+        if ear_window % 2 == 0:
+            ear_window += 1
+        self.ear_samples = deque(maxlen=ear_window)
+        self.eye_quality_threshold = float(
+            self.stability_config.get("eye_quality_threshold", 0.25)
+        )
+        self.close_confirm_seconds = max(
+            0.0, float(self.stability_config.get("close_confirm_seconds", 0.08))
+        )
+        self.open_confirm_seconds = max(
+            0.0, float(self.stability_config.get("open_confirm_seconds", 0.15))
+        )
+        self.unreliable_hold_seconds = max(
+            0.0, float(self.stability_config.get("unreliable_hold_seconds", 0.25))
+        )
+        self.face_loss_hold_seconds = max(
+            0.0, float(self.stability_config.get("face_loss_hold_seconds", 0.25))
+        )
+        self.profile_min_confidence = float(self.calibration_config.get("profile_min_confidence", 0.35))
         self.profile_warning_seconds = float(self.calibration_config.get("profile_warning_seconds", 0.8))
         self.calibrated_profile = "NO_CALIBRADO"
         self.calibrated_profile_confidence = 0.0
@@ -30,7 +54,7 @@ class FatigueDetector(object):
         self.gaze_away_since = None
         self.no_face_since = None
         self.recovery_since = None
-        self.last_transition = time.monotonic()
+        self.last_transition = self.clock()
         self.perclos = deque()
         self._perclos_total_seconds = 0.0
         self._perclos_closed_seconds = 0.0
@@ -43,10 +67,14 @@ class FatigueDetector(object):
         self.possible_yawn = False
         self.possible_nod = False
         self.gaze_away_seconds = 0.0
+        self.head_pitch_baseline = None
+        self._reset_eye_signal(clear_history=True)
 
     def reset(self):
         threshold = self.ear_threshold
         drowsy_threshold = self.drowsy_ear_threshold
+        open_threshold = self.ear_open_threshold
+        pitch_baseline = self.head_pitch_baseline
         self.state = "NORMAL"
         self.previous_state = None
         self.reason = "Metricas temporales reiniciadas"
@@ -56,7 +84,7 @@ class FatigueDetector(object):
         self.gaze_away_since = None
         self.no_face_since = None
         self.recovery_since = None
-        self.last_transition = time.monotonic()
+        self.last_transition = self.clock()
         self.perclos.clear()
         self._perclos_total_seconds = 0.0
         self._perclos_closed_seconds = 0.0
@@ -71,6 +99,9 @@ class FatigueDetector(object):
         self.gaze_away_seconds = 0.0
         self.ear_threshold = threshold
         self.drowsy_ear_threshold = drowsy_threshold
+        self.ear_open_threshold = open_threshold
+        self.head_pitch_baseline = pitch_baseline
+        self._reset_eye_signal(clear_history=True)
         self.calibrated_profile = "NO_CALIBRADO"
         self.calibrated_profile_confidence = 0.0
         self.calibrated_profile_since = None
@@ -78,6 +109,7 @@ class FatigueDetector(object):
 
     def apply_calibrated_threshold(self, value):
         self.ear_threshold = float(value)
+        self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
 
     def apply_calibration(self, result):
         thresholds = result.get("thresholds", {}) if result else {}
@@ -87,9 +119,16 @@ class FatigueDetector(object):
             self.ear_threshold = float(result["ear_threshold"])
         if thresholds.get("drowsy_ear_threshold") is not None:
             self.drowsy_ear_threshold = float(thresholds["drowsy_ear_threshold"])
+        if thresholds.get("ear_open_threshold") is not None:
+            self.ear_open_threshold = float(thresholds["ear_open_threshold"])
+        else:
+            self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
+        if thresholds.get("open_pitch_reference") is not None:
+            self.head_pitch_baseline = float(thresholds["open_pitch_reference"])
+        self._reset_eye_signal(clear_history=True)
 
     def update(self, metrics, mode="AUTOMATIC"):
-        now = time.monotonic()
+        now = self.clock()
         self.previous_state = self.state
         if mode == "EMERGENCY":
             self._pause_perclos(now)
@@ -103,8 +142,13 @@ class FatigueDetector(object):
                 self.no_face_since = now
             no_face_time = now - self.no_face_since
             metrics["no_face_seconds"] = no_face_time
-            self.closed_since = None
-            self.closed_duration = 0.0
+            if no_face_time <= self.face_loss_hold_seconds:
+                return self._set(
+                    self.state,
+                    "Rostro inestable: conservando estado %.2f s" % no_face_time,
+                    now,
+                )
+            self._reset_eye_signal(clear_history=True)
             self.calibrated_profile = "DESCONOCIDO"
             self.calibrated_profile_confidence = 0.0
             self.calibrated_profile_since = None
@@ -114,18 +158,34 @@ class FatigueDetector(object):
             return self._set("NORMAL", "Perdida momentanea de rostro", now)
         self.no_face_since = None
         metrics["no_face_seconds"] = 0.0
-        ear = metrics.get("ear")
+        ear = metrics.get("ear_raw", metrics.get("ear"))
         quality = float(metrics.get("quality", 0.0))
-        reliable = ear is not None and quality >= 0.25
-        closed = reliable and ear < self.ear_threshold
-        self._update_perclos(now, bool(closed and reliable))
-        self._update_eye_timing(now, closed, reliable)
+        sample_reliable = bool(
+            ear is not None
+            and quality >= self.eye_quality_threshold
+            and metrics.get("eye_reliable", True)
+        )
+        filtered_ear = self._filter_ear(ear, sample_reliable)
+        closed_state, reliable = self._update_eye_state(
+            now, filtered_ear, sample_reliable
+        )
+        closed = bool(closed_state) if closed_state is not None else False
+        if closed_state is None:
+            self._pause_perclos(now)
+        else:
+            self._update_perclos(now, closed)
+        self._update_eye_timing(now, closed_state, reliable)
         self._update_calibrated_profile(now, metrics)
         self._update_yawn(now, metrics)
         self._update_head(now, metrics)
         self._update_gaze(now, metrics)
         metrics.update({
             "ear_threshold": self.ear_threshold,
+            "ear_open_threshold": self.ear_open_threshold,
+            "ear_filtered": filtered_ear,
+            "eye_closed_stable": closed_state,
+            "eye_decision_reliable": reliable,
+            "eye_signal_status": self.eye_signal_status,
             "closed_seconds": self.closed_duration,
             "perclos": self.current_perclos(now),
             "blink_count_recent": len(self.blinks),
@@ -140,6 +200,73 @@ class FatigueDetector(object):
             "drowsy_ear_threshold": self.drowsy_ear_threshold,
         })
         return self._decide(now, metrics, closed, reliable)
+
+    def _filter_ear(self, ear, reliable):
+        if reliable:
+            self.ear_samples.append(float(ear))
+        if not self.ear_samples:
+            return None
+        ordered = sorted(self.ear_samples)
+        return float(ordered[len(ordered) // 2])
+
+    def _update_eye_state(self, now, ear, sample_reliable):
+        self.eye_state_changed = False
+        if not sample_reliable or ear is None:
+            if (
+                self.last_reliable_eye_time is not None
+                and now - self.last_reliable_eye_time <= self.unreliable_hold_seconds
+            ):
+                self.eye_signal_status = "RETENIDO"
+                return self.eye_closed, True
+            self.eye_candidate_state = None
+            self.eye_candidate_since = None
+            self.eye_signal_status = "NO_CONFIABLE"
+            return None, False
+
+        self.last_reliable_eye_time = now
+        if self.eye_closed:
+            observed_closed = float(ear) < self.ear_open_threshold
+        else:
+            observed_closed = float(ear) <= self.ear_threshold
+
+        if observed_closed == self.eye_closed:
+            self.eye_candidate_state = None
+            self.eye_candidate_since = None
+            self.eye_signal_status = "CERRADO" if self.eye_closed else "ABIERTO"
+            return self.eye_closed, True
+
+        if self.eye_candidate_state != observed_closed or self.eye_candidate_since is None:
+            self.eye_candidate_state = observed_closed
+            self.eye_candidate_since = now
+
+        confirm_seconds = (
+            self.close_confirm_seconds if observed_closed else self.open_confirm_seconds
+        )
+        if now - self.eye_candidate_since >= confirm_seconds:
+            self.eye_closed = observed_closed
+            self.eye_state_since = self.eye_candidate_since
+            self.eye_state_changed = True
+            self.eye_state_transition_at = self.eye_candidate_since
+            self.eye_candidate_state = None
+            self.eye_candidate_since = None
+            self.eye_signal_status = "CERRADO" if self.eye_closed else "ABIERTO"
+        else:
+            self.eye_signal_status = "CONFIRMANDO_CIERRE" if observed_closed else "CONFIRMANDO_APERTURA"
+        return self.eye_closed, True
+
+    def _reset_eye_signal(self, clear_history=False):
+        if clear_history and hasattr(self, "ear_samples"):
+            self.ear_samples.clear()
+        self.eye_closed = False
+        self.eye_candidate_state = None
+        self.eye_candidate_since = None
+        self.eye_state_since = None
+        self.eye_state_changed = False
+        self.eye_state_transition_at = None
+        self.last_reliable_eye_time = None
+        self.eye_signal_status = "INICIAL"
+        self.closed_since = None
+        self.closed_duration = 0.0
 
     def _update_perclos(self, now, closed):
         if self._perclos_last_time is not None:
@@ -189,15 +316,16 @@ class FatigueDetector(object):
         )
 
     def _update_eye_timing(self, now, closed, reliable):
-        if not reliable:
+        if not reliable or closed is None:
             return
         if closed:
             if self.closed_since is None:
-                self.closed_since = now
+                self.closed_since = self.eye_state_since if self.eye_state_since is not None else now
             self.closed_duration = now - self.closed_since
         else:
-            if self.closed_since is not None:
-                dur = now - self.closed_since
+            if self.eye_state_changed and self.closed_since is not None:
+                ended_at = self.eye_state_transition_at if self.eye_state_transition_at is not None else now
+                dur = max(0.0, ended_at - self.closed_since)
                 if float(self.config["blink_min_seconds"]) <= dur <= float(self.config["blink_max_seconds"]):
                     self.blinks.append(now)
                     self.last_blink_duration = dur
@@ -238,7 +366,12 @@ class FatigueDetector(object):
 
     def _update_head(self, now, metrics):
         pitch = metrics.get("pitch")
-        active = pitch is not None and abs(float(pitch)) >= float(self.config["head_nod_pitch_threshold"])
+        pitch_delta = None
+        if pitch is not None:
+            reference = self.head_pitch_baseline if self.head_pitch_baseline is not None else 0.0
+            pitch_delta = float(pitch) - reference
+        metrics["pitch_delta"] = pitch_delta
+        active = pitch_delta is not None and abs(pitch_delta) >= float(self.config["head_nod_pitch_threshold"])
         if active:
             if self.nod_since is None:
                 self.nod_since = now
