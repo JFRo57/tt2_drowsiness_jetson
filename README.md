@@ -333,6 +333,47 @@ python3 main.py --config config.json --presentation
 python3 main.py --gpio-self-test
 ```
 
+### Diagnóstico completo de componentes
+
+Para probar cada LED, los tonos de 2500/3500/4500 Hz y los patrones reales
+sin abrir la cámara:
+
+```bash
+python3 scripts/test_components.py
+```
+
+También se puede aislar una sección o comprobar una posible polaridad
+invertida en los LEDs:
+
+```bash
+python3 scripts/test_components.py --section leds --led-seconds 5
+python3 scripts/test_components.py --section leds --led-active-low
+python3 scripts/test_components.py --section buzzer
+python3 scripts/test_components.py --section patterns
+```
+
+La lectura GPIO confirma el nivel solicitado por software; la presencia de
+voltaje y el encendido físico deben verificarse visualmente o con multímetro.
+
+### Sincronización de alertas con las salidas físicas
+
+El estado calculado por el detector es la única fuente de verdad. Cada nivel
+se envía en paralelo a la interfaz, los LEDs y el buzzer:
+
+| Estado | LED físico | Buzzer |
+|---|---|---|
+| `NORMAL` / `PARPADEO` | Verde continuo | Apagado |
+| `POSIBLE_SOMNOLENCIA` | Amarillo intermitente | Pulsos a 2500 Hz |
+| `ALERTA` | Rojo intermitente | Pulsos a 3500 Hz |
+| `ALERTA_CRITICA` | Rojo intermitente rápido | Pulsos a 4500 Hz |
+
+La aplicación actualiza los patrones aunque la cámara tarde o pierda cuadros.
+Cuando se solicita GPIO físico, un fallo de inicialización detiene el arranque
+en vez de continuar silenciosamente en simulación. Además, la última orden se
+reafirma cada `gpio.output_refresh_seconds` (0.5 s por defecto) para evitar que
+la salida quede desincronizada del nivel de alerta. La interfaz sigue siendo
+una representación alternativa y no controla los componentes.
+
 ---
 
 ## ⌨️ Controles de la interfaz
@@ -507,6 +548,7 @@ tt2_drowsiness_jetson_v3/
 │   ├── setup_v3_models.sh          # Descarga y verifica los modelos
 │   ├── benchmark_accelerators.py   # Compara CPU, CUDA y FP16
 │   ├── benchmark_pipeline.py       # Benchmark reproducible cámara + visión
+│   ├── test_components.py          # Prueba física de LEDs, tonos y patrones
 │   └── configure_pwm2_jetson_nano.sh
 ├── src/
 │   ├── application.py              # Orquestación de la aplicación
@@ -522,7 +564,9 @@ tt2_drowsiness_jetson_v3/
 ├── systemd/
 │   └── tt2-pwm2-pinmux.service
 └── tests/
+    ├── test_application_outputs.py
     ├── test_calibration.py
+    ├── test_component_tester.py
     ├── test_gpio_controller.py
     └── test_performance.py
 ```

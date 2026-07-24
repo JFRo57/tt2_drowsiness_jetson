@@ -29,6 +29,12 @@ class GPIOController(object):
         self.software_buzzer_frequency = 0
         self.leds = {"green": False, "yellow": False, "red": False}
         self._led_output_state = None
+        self.output_refresh_seconds = max(
+            0.1,
+            float(self.gpio_cfg.get("output_refresh_seconds", 0.5)),
+        )
+        self._last_led_output_at = 0.0
+        self._last_native_buzzer_output_at = 0.0
         self.simulated_mode = ModeController.AUTOMATIC
         self.mode_source = "simulado"
         self.error = None
@@ -239,8 +245,17 @@ class GPIOController(object):
         maximum = int(self.buzzer_cfg.get("max_frequency", 5000))
         frequency = max(minimum, min(maximum, int(frequency)))
 
-        if (self.native_pwm_ready and self.native_buzzer_output_on == bool(on)
-                and (not on or self.native_buzzer_frequency == frequency)):
+        now = time.monotonic()
+        same_output = (
+            self.native_pwm_ready
+            and self.native_buzzer_output_on == bool(on)
+            and (not on or self.native_buzzer_frequency == frequency)
+        )
+        if (
+            same_output
+            and now - self._last_native_buzzer_output_at
+            < self.output_refresh_seconds
+        ):
             return
 
         pwm_path, period, enabled = self._ensure_native_pwm(frequency)
@@ -255,6 +270,7 @@ class GPIOController(object):
             self._write_pwm_value(os.path.join(pwm_path, "enable"), 1)
         self.buzzer_pwm_started = True
         self.native_buzzer_output_on = bool(on)
+        self._last_native_buzzer_output_at = now
 
     def _discard_native_pwm(self):
         if not self._uses_native_buzzer() or not self.native_pwm_ready:
@@ -285,7 +301,11 @@ class GPIOController(object):
             }
             if self.simulation_mode or self.GPIO is None or not self.led_cfg.get("enabled", True):
                 return
-            if desired == self._led_output_state:
+            now = time.monotonic()
+            if (
+                desired == self._led_output_state
+                and now - self._last_led_output_at < self.output_refresh_seconds
+            ):
                 return
             active_high = self.led_cfg.get("active_high", True)
             pins = {"green": int(self.led_cfg["green_board_pin"]), "yellow": int(self.led_cfg["yellow_board_pin"]), "red": int(self.led_cfg["red_board_pin"])}
@@ -293,6 +313,7 @@ class GPIOController(object):
                 level = self._active_level(active_high) if self.leds[name] else self._inactive_level(active_high)
                 self.GPIO.output(pin, level)
             self._led_output_state = desired
+            self._last_led_output_at = now
 
     def read_switch_mode(self):
         if self.simulation_mode or self.GPIO is None or not self.switch_cfg.get("enabled", False):
@@ -362,3 +383,5 @@ class GPIOController(object):
         finally:
             self.GPIO = None
             self._led_output_state = None
+            self._last_led_output_at = 0.0
+            self._last_native_buzzer_output_at = 0.0

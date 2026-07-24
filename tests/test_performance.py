@@ -154,6 +154,20 @@ class GPIOWriteCoalescingTests(unittest.TestCase):
         controller.set_led_state(False, True, False)
         self.assertEqual(6, len(controller.GPIO.outputs))
 
+    def test_identical_led_state_is_reasserted_after_refresh_interval(self):
+        config = default_config()
+        config["gpio"]["enabled"] = True
+        config["gpio"]["simulation_mode"] = False
+        controller = GPIOController(config)
+        controller.simulation_mode = False
+        controller.GPIO = FakeGPIO()
+
+        controller.set_led_state(True, False, False)
+        controller._last_led_output_at -= controller.output_refresh_seconds + 0.1
+        controller.set_led_state(True, False, False)
+
+        self.assertEqual(6, len(controller.GPIO.outputs))
+
 
 class InterfaceAllocationTests(unittest.TestCase):
     def test_information_panel_reuses_canvas(self):

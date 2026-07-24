@@ -26,7 +26,7 @@ def default_config():
         "stability": {"landmark_shape_alpha": 0.30, "landmark_translation_alpha": 0.75, "tracking_rect_alpha": 0.35, "redetection_rect_alpha": 0.30, "redetection_min_iou": 0.15, "redetection_max_center_shift": 0.45, "redetection_miss_tolerance": 2, "ear_median_window": 3, "ear_hysteresis": 0.012, "close_confirm_seconds": 0.08, "open_confirm_seconds": 0.15, "unreliable_hold_seconds": 0.25, "face_loss_hold_seconds": 0.25, "eye_quality_threshold": 0.25, "min_eye_width_pixels": 10.0, "min_eye_sharpness": 12.0, "max_eye_ear_difference": 0.12, "max_eye_ear_difference_ratio": 0.65, "max_eye_yaw_degrees": 32.0},
         "fatigue": {"ear_threshold": 0.22, "use_session_calibration": True, "blink_min_seconds": 0.08, "blink_max_seconds": 0.70, "prealert_closed_seconds": 0.45, "alert_closed_seconds": 0.85, "critical_closed_seconds": 1.6, "recovery_seconds": 1.0, "perclos_window_seconds": 60, "perclos_warning_threshold": 0.25, "perclos_alert_threshold": 0.35, "mar_threshold": 0.65, "yawn_min_seconds": 1.0, "head_nod_pitch_threshold": 18.0, "head_nod_min_seconds": 0.8, "gaze_away_warning_seconds": 2.0, "no_face_warning_seconds": 2.0},
         "calibration": {"duration_seconds": 5.0, "min_samples": 30, "quality_threshold": 0.30, "min_ear_gap": 0.020, "max_ear_std": 0.035, "max_ear_mad": 0.025, "max_profile_overlap_ratio": 0.65, "max_profile_distance": 4.0, "profile_min_confidence": 0.35, "profile_warning_seconds": 0.8, "feature_scales": {"ear": 0.04, "mar": 0.15, "pitch": 12.0, "yaw": 15.0, "roll": 15.0}},
-        "gpio": {"enabled": False, "simulation_mode": True, "numbering": "BOARD"},
+        "gpio": {"enabled": False, "simulation_mode": True, "numbering": "BOARD", "output_refresh_seconds": 0.5},
         "buzzer": {"enabled": True, "type": "pwm_native", "board_pin": 33, "active_high": False, "muted": False, "idle_frequency": 3000, "pwm_duty_cycle": 50, "pwm_chip": 0, "pwm_channel": 2, "min_frequency": 2000, "max_frequency": 5000},
         "leds": {"enabled": True, "active_high": True, "green_board_pin": 29, "yellow_board_pin": 31, "red_board_pin": 32},
         "switch": {"enabled": False, "topology": "on_off_on", "auto_board_pin": 35, "emergency_board_pin": 37, "center_mode": "MAINTENANCE", "active_low": True, "debounce_ms": 100},
@@ -92,7 +92,7 @@ class DrowsinessApplication(object):
             performance = self.config.get("performance", {})
             cv2.setUseOptimized(bool(performance.get("opencv_optimized", True)))
             cv2.setNumThreads(max(0, int(performance.get("opencv_threads", 2))))
-            self.gpio.setup()
+            self._setup_outputs()
             self.logger.open()
             self.face = FaceAnalyzer(self.config)
             if not self.camera.start():
@@ -112,6 +112,22 @@ class DrowsinessApplication(object):
             self.cleanup()
         return exit_code
 
+    def _setup_outputs(self):
+        setup_ok = self.gpio.setup()
+        gpio_cfg = self.config.get("gpio", {})
+        physical_requested = (
+            not self.simulation
+            and bool(gpio_cfg.get("enabled", False))
+            and not bool(gpio_cfg.get("simulation_mode", True))
+        )
+        if physical_requested and (
+            not setup_ok or self.gpio.simulation_mode or self.gpio.GPIO is None
+        ):
+            raise RuntimeError(
+                self.gpio.error
+                or "Se solicito GPIO fisico, pero no pudo inicializarse"
+            )
+
     def _loop(self):
         frames = 0
         last_fps = time.monotonic()
@@ -122,6 +138,9 @@ class DrowsinessApplication(object):
 
         while not self.shutdown.requested:
             self.mode.update_from_switch(self.gpio)
+            # El estado del detector es la fuente de verdad para las salidas.
+            # Mantener los patrones activos aunque la camara tarde o pierda cuadros.
+            self.alerts.update(self.detector.state, self.mode.mode)
             frame, timestamp, sequence = self.camera.wait_for_frame(
                 last_sequence,
                 timeout=self.frame_wait_timeout,

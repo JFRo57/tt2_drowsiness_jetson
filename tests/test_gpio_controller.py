@@ -103,6 +103,18 @@ class GPIOControllerBuzzerTests(unittest.TestCase):
         self.assertEqual("125000", self._read(self._path("duty_cycle")))
         self.assertEqual("1", self._read(self._path("enable")))
 
+    def test_native_pwm_reasserts_requested_tone_periodically(self):
+        controller = self._controller()
+        controller.set_buzzer_tone(2500)
+        self._write(self._path("duty_cycle"), "400000")
+        controller._last_native_buzzer_output_at -= (
+            controller.output_refresh_seconds + 0.1
+        )
+
+        controller.set_buzzer_tone(2500)
+
+        self.assertEqual("200000", self._read(self._path("duty_cycle")))
+
     def test_cleanup_leaves_low_trigger_module_high(self):
         controller = self._controller()
         controller.set_buzzer_tone(3500)
