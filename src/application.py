@@ -78,13 +78,13 @@ def default_config():
     }
     config["calibration"].update({
         "profile_path": "calibration_profile.json", "auto_start_if_missing": True,
-        "preparation_seconds": 2.0,
+        "preparation_seconds": 2.0, "require_stage_confirmation": True,
         "min_valid_sample_ratio": 0.65, "min_open_closed_gap": 0.06,
         "max_head_angle_std_degrees": 6.0,
         "max_eye_asymmetry_ratio": 0.35, "max_partial_eye_difference": 0.25,
         "min_possible_ear": 0.03, "max_possible_ear": 0.60,
-        "natural_blink_observation_seconds": 8.0,
-        "voluntary_blink_observation_seconds": 15.0,
+        "natural_blink_observation_seconds": 60.0,
+        "voluntary_blink_observation_seconds": 60.0,
         "min_natural_blinks": 3, "min_voluntary_blinks": 5,
         "calibration_blink_max_seconds": 1.2, "blink_min_seconds": 0.08,
         "blink_start_closure_level": 0.35,
@@ -168,6 +168,14 @@ class DrowsinessApplication(object):
             self.face.reset_eye_filter()
         self.calibration.start(profile)
         print("CALIBRACION:", self.calibration.message)
+
+    def confirm_calibration_step(self):
+        if not self.calibration.confirm_pending_stage():
+            return False
+        if self.face is not None:
+            self.face.reset_eye_filter()
+        print("CALIBRACION:", self.calibration.message)
+        return True
 
     def run(self):
         exit_code = 0
@@ -411,12 +419,18 @@ class DrowsinessApplication(object):
             return
         if not result.get("accepted"):
             return
-        next_stage = self.calibration.next_required_stage()
+        next_stage = result.get("next_stage") or self.calibration.next_required_stage()
         if next_stage is not None and not self.calibration.active:
-            if self.face is not None:
-                self.face.reset_eye_filter()
-            self.calibration.start(next_stage)
-            print("CALIBRACION:", self.calibration.message)
+            if self.config.get("calibration", {}).get(
+                "require_stage_confirmation", False,
+            ):
+                self.calibration.await_next_stage(next_stage)
+                print("CALIBRACION:", self.calibration.message)
+            else:
+                if self.face is not None:
+                    self.face.reset_eye_filter()
+                self.calibration.start(next_stage)
+                print("CALIBRACION:", self.calibration.message)
 
     def _render_if_needed(self, metrics, frame=None):
         if not self.ui:
@@ -445,6 +459,8 @@ class DrowsinessApplication(object):
         key = cv2.waitKey(1) & 0xFF
         if key != 255:
             self.ui.handle_key(key, self)
+        if self.ui.consume_click():
+            self.confirm_calibration_step()
         if self.ui.is_closed():
             self.shutdown.request("Ventana cerrada")
 

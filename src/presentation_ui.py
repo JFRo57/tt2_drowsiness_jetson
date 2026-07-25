@@ -17,6 +17,7 @@ class PresentationUI(object):
         self.closed_checks = 0
         self._panel_canvas = None
         self._panel_shape = None
+        self._click_requested = False
 
     def create(self):
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
@@ -24,7 +25,17 @@ class PresentationUI(object):
         width = int(camera_cfg.get("display_width", 1100))
         height = int(camera_cfg.get("display_height", 620))
         cv2.resizeWindow(self.window, width, height)
+        cv2.setMouseCallback(self.window, self._on_mouse)
         self.created = True
+
+    def _on_mouse(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._click_requested = True
+
+    def consume_click(self):
+        clicked = self._click_requested
+        self._click_requested = False
+        return clicked
 
     def draw(self, frame, metrics, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
         view = self._display_frame(frame)
@@ -187,8 +198,9 @@ class PresentationUI(object):
         target = metrics.get("calibration_target", "")
         progress = max(0.0, min(1.0, float(metrics.get("calibration_progress", 0.0))))
         preparing = bool(metrics.get("calibration_preparing", False))
+        waiting = bool(metrics.get("calibration_waiting_confirmation", False))
         remaining = float(metrics.get("calibration_prepare_remaining_seconds", 0.0))
-        mode = "PREPARANDO" if preparing else "CALIBRANDO"
+        mode = "CONFIRMAR" if waiting else ("PREPARANDO" if preparing else "CALIBRANDO")
         message = metrics.get("calibration_message") or "Vehiculo detenido; no mueva la cabeza"
         if len(message) > 92:
             message = message[:89] + "..."
@@ -200,8 +212,12 @@ class PresentationUI(object):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
         cv2.putText(view, message, (40, 124),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1)
-        detail = ("Comienza en %.1f s" % remaining if preparing
-                  else "Muestras validas: %d / intentos: %d" % (samples, attempts))
+        if waiting:
+            detail = "Click izquierdo, ESPACIO o ENTER para continuar"
+        elif preparing:
+            detail = "Comienza en %.1f s" % remaining
+        else:
+            detail = "Muestras validas: %d / intentos: %d" % (samples, attempts)
         cv2.putText(view, detail, (40, 148), cv2.FONT_HERSHEY_SIMPLEX,
                     0.46, (220, 220, 220), 1)
         cv2.rectangle(view, (40, 158), (40 + width, 169), (90, 90, 90), 1)
@@ -289,6 +305,8 @@ class PresentationUI(object):
             app.start_calibration("CLOSED")
         elif key in (ord("b"), ord("B")):
             app.start_calibration("DYNAMIC")
+        elif key in (32, 10, 13):
+            app.confirm_calibration_step()
         elif key in (ord("l"), ord("L")):
             self.show_landmarks = not self.show_landmarks
         elif key in (ord("i"), ord("I")):

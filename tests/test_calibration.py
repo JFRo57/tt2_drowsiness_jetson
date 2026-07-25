@@ -52,6 +52,7 @@ class CalibrationManagerTests(unittest.TestCase):
             "profile_path": os.path.join(self.temp.name, "profile.json"),
             "duration_seconds": 0.20,
             "preparation_seconds": 0.0,
+            "require_stage_confirmation": False,
             "min_samples": 3,
             "min_valid_sample_ratio": 0.60,
             "min_ear_gap": 0.015,
@@ -281,23 +282,31 @@ class DetectorProfileTests(unittest.TestCase):
 class PresentationCalibrationKeyTests(unittest.TestCase):
     def test_keys_use_reduced_closed_dynamic_and_full_names(self):
         selected = []
+        confirmed = []
 
         class FakeApp(object):
             def start_calibration(self, profile):
                 selected.append(profile)
 
+            def confirm_calibration_step(self):
+                confirmed.append(True)
+                return True
+
         ui = PresentationUI(default_config())
         app = FakeApp()
         for key in ("o", "s", "d", "b", "c"):
             ui.handle_key(ord(key), app)
+        for key in (32, 10, 13):
+            ui.handle_key(key, app)
 
         self.assertEqual(
             ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "FULL"], selected
         )
+        self.assertEqual(3, len(confirmed))
 
 
 class ApplicationCalibrationFlowTests(unittest.TestCase):
-    def test_full_sequence_advances_from_open_to_reduced(self):
+    def test_full_sequence_waits_for_confirmation_then_starts_reduced(self):
         temp = tempfile.TemporaryDirectory()
         try:
             clock = FakeClock()
@@ -320,6 +329,15 @@ class ApplicationCalibrationFlowTests(unittest.TestCase):
                     clock.advance(0.06)
 
                 app._handle_calibration_result(result)
+
+            self.assertFalse(app.calibration.active)
+            self.assertTrue(app.calibration.awaiting_confirmation)
+            self.assertEqual("REDUCED", app.calibration.pending_confirmation_profile)
+            self.assertTrue(
+                app.calibration.status_metrics()["calibration_waiting_confirmation"]
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertTrue(app.confirm_calibration_step())
 
             self.assertTrue(app.calibration.active)
             self.assertEqual("REDUCED", app.calibration.active_profile)

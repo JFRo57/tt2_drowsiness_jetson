@@ -399,6 +399,7 @@ una representación alternativa y no controla los componentes.
 | `S` | Repetir **apertura ocular reducida** |
 | `D` | Repetir **ojos completamente cerrados** |
 | `B` | Repetir observación dinámica de parpadeos |
+| Click izquierdo / `Espacio` / `Enter` | Confirmar e iniciar la siguiente etapa de calibración |
 | `C` | Reiniciar la calibración completa |
 | `L` | Mostrar u ocultar landmarks |
 | `I` | Mostrar u ocultar el panel de información |
@@ -425,10 +426,14 @@ y una iluminación similar a la de uso:
 5. El monitoreo comienza sólo cuando las etapas y el perfil completo son
    válidos. `O`, `S`, `D` y `B` permiten repetir únicamente la parte indicada.
 
-Antes de cada captura aparece `PREPARANDO` durante
-`calibration.preparation_seconds` (`2.0 s` por defecto). Usa esa pausa para
-colocar los ojos/postura de la etapa siguiente; las muestras no se guardan hasta
-que la pantalla cambia a `CALIBRANDO`.
+Después de cada etapa aceptada aparece `CONFIRMAR`. Haz click izquierdo o
+presiona `Espacio`/`Enter` cuando la persona ya esté lista para la etapa
+siguiente. Luego aparece `PREPARANDO` durante `calibration.preparation_seconds`
+(`2.0 s` por defecto); las muestras no se guardan hasta que la pantalla cambia
+a `CALIBRANDO`.
+
+La observación de parpadeos naturales y el respaldo de parpadeos voluntarios
+normales duran `60 s` por defecto.
 
 Cada etapa usa medianas izquierda, derecha y conjunta, dispersión, cobertura y
 estabilidad de pose. Debe cumplirse abierto > reducido > cerrado por ojo, con

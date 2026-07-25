@@ -30,7 +30,7 @@ class CalibrationManager(object):
                     "por completo"),
         "CLOSED": ("Cierre los ojos de forma natural; haga dos cierres si la "
                    "deteccion facial lo permite"),
-        "DYNAMIC_NATURAL": "Mire al frente de manera natural durante unos segundos",
+        "DYNAMIC_NATURAL": "Mire al frente de manera natural durante un minuto",
         "DYNAMIC_VOLUNTARY": ("Realice entre cinco y ocho parpadeos normales, "
                               "sin exagerarlos"),
     }
@@ -43,6 +43,9 @@ class CalibrationManager(object):
         self.duration = float(self.config.get("duration_seconds", 5.0))
         self.preparation_seconds = max(
             0.0, float(self.config.get("preparation_seconds", 0.0))
+        )
+        self.require_stage_confirmation = bool(
+            self.config.get("require_stage_confirmation", False)
         )
         self.min_samples = int(self.config.get("min_samples", 30))
         self.quality_threshold = float(self.config.get("quality_threshold", 0.30))
@@ -65,6 +68,8 @@ class CalibrationManager(object):
         self.started = 0.0
         self.capture_started = 0.0
         self.preparing = False
+        self.awaiting_confirmation = False
+        self.pending_confirmation_profile = None
         self.samples = []
         self.sample_attempts = 0
         self.progress = 0.0
@@ -90,6 +95,7 @@ class CalibrationManager(object):
 
     def ready_for_monitoring(self):
         return bool(self.model_ready and self.profile_data and not self.active
+                    and not self.awaiting_confirmation
                     and not self.pending_recalibration)
 
     def next_required_stage(self):
@@ -100,6 +106,8 @@ class CalibrationManager(object):
 
     def start(self, profile="OPEN"):
         requested = str(profile or "OPEN").upper()
+        self.awaiting_confirmation = False
+        self.pending_confirmation_profile = None
         if requested in ("FULL", "SEQUENCE", "CALIBRATION"):
             self.profiles = {}
             self.thresholds = {}
@@ -181,11 +189,47 @@ class CalibrationManager(object):
             result["ear_threshold"] = provisional
             self.result_threshold = provisional
         if self.static_ready:
-            self._start_dynamic("NATURAL")
-            result["dynamic_started"] = True
-            result["reason"] = self.message
+            if self.require_stage_confirmation:
+                result["next_stage"] = "DYNAMIC_NATURAL"
+                self.message = self._confirmation_message("DYNAMIC_NATURAL")
+                result["reason"] = self.message
+            else:
+                self._start_dynamic("NATURAL")
+                result["dynamic_started"] = True
+                result["reason"] = self.message
         self.last_result = result
         return result
+
+    def await_next_stage(self, profile):
+        requested = str(profile or "").upper()
+        if requested in ("DYNAMIC", "DYNAMIC_NATURAL"):
+            requested = "DYNAMIC_NATURAL"
+        elif requested == "DYNAMIC_VOLUNTARY":
+            requested = "DYNAMIC_VOLUNTARY"
+        else:
+            requested = self.PROFILE_ALIASES.get(requested)
+        valid_dynamic = requested in ("DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY")
+        if requested not in self.STATIC_PROFILES and not valid_dynamic:
+            return False
+        self.active = False
+        self.active_profile = None
+        self.preparing = False
+        self.progress = 0.0
+        self.samples = []
+        self.sample_attempts = 0
+        self.awaiting_confirmation = True
+        self.pending_confirmation_profile = requested
+        self.message = self._confirmation_message(requested)
+        return True
+
+    def confirm_pending_stage(self):
+        if not self.awaiting_confirmation or not self.pending_confirmation_profile:
+            return False
+        profile = self.pending_confirmation_profile
+        self.awaiting_confirmation = False
+        self.pending_confirmation_profile = None
+        self.start(profile)
+        return True
 
     def classify(self, metrics):
         if not self.profile_data:
@@ -244,10 +288,12 @@ class CalibrationManager(object):
         if self.active and self.preparing:
             prepare_remaining = max(0.0, self.capture_started - self.clock())
         return {
-            "calibration_active": self.active,
-            "calibration_target": self.active_profile or "",
+            "calibration_active": self.active or self.awaiting_confirmation,
+            "calibration_target": (self.pending_confirmation_profile
+                if self.awaiting_confirmation else self.active_profile or ""),
             "calibration_progress": self.progress if self.active else 0.0,
             "calibration_preparing": bool(self.active and self.preparing),
+            "calibration_waiting_confirmation": bool(self.awaiting_confirmation),
             "calibration_prepare_remaining_seconds": prepare_remaining,
             "calibration_ready": self.ready_for_monitoring(),
             "calibration_static_ready": self.static_ready,
@@ -446,9 +492,9 @@ class CalibrationManager(object):
         if self._preparation_active(now):
             return None
         self.sample_attempts += 1
-        duration = (float(self.config.get("natural_blink_observation_seconds", 8.0))
+        duration = (float(self.config.get("natural_blink_observation_seconds", 60.0))
                     if self.dynamic_mode == "NATURAL" else
-                    float(self.config.get("voluntary_blink_observation_seconds", 15.0)))
+                    float(self.config.get("voluntary_blink_observation_seconds", 60.0)))
         self.progress = min(1.0, (now - self.started) / max(0.1, duration))
         self._update_dynamic_blink(metrics, now)
         events = (self.dynamic_natural_events if self.dynamic_mode == "NATURAL"
@@ -463,6 +509,16 @@ class CalibrationManager(object):
         if self.dynamic_mode == "NATURAL":
             if len(events) >= required:
                 return self._complete_profile()
+            if self.require_stage_confirmation:
+                self.active = False
+                self.active_profile = None
+                self.message = ("Solo se detectaron %d parpadeos naturales validos. "
+                                "%s" % (len(events),
+                                          self._confirmation_message("DYNAMIC_VOLUNTARY")))
+                return {"accepted": True, "profile": "DYNAMIC_NATURAL",
+                        "dynamic_fallback": True, "natural_blinks": len(events),
+                        "next_stage": "DYNAMIC_VOLUNTARY", "model_ready": False,
+                        "reason": self.message}
             self._start_dynamic("VOLUNTARY")
             self.message = "Solo se detectaron %d parpadeos naturales validos. %s" % (
                 len(events), self.INSTRUCTIONS["DYNAMIC_VOLUNTARY"])
@@ -488,6 +544,13 @@ class CalibrationManager(object):
                 self.PROFILE_LABELS.get(profile, profile), instruction,
             )
         return instruction
+
+    def _confirmation_message(self, profile):
+        label = self.PROFILE_LABELS.get(profile, profile)
+        instruction = self.INSTRUCTIONS.get(profile, "Siga la instruccion de calibracion")
+        return "Haga click o presione ESPACIO para iniciar %s. %s" % (
+            label, instruction,
+        )
 
     def _preparation_active(self, now):
         if not self.preparing:

@@ -526,6 +526,8 @@ Teclas disponibles:
 - `S`: repetir la etapa de apertura ocular reducida.
 - `D`: repetir la etapa de ojos completamente cerrados.
 - `B`: repetir la observacion dinámica de parpadeos.
+- Click izquierdo, `Espacio` o `Enter`: confirmar e iniciar la siguiente etapa
+  de calibración.
 - `L`: mostrar u ocultar landmarks.
 - `I`: mostrar u ocultar panel de informacion.
 - `V`: activar o desactivar el overlay de depuracion.
@@ -550,10 +552,12 @@ Con el vehiculo detenido, la camara en su posicion final y luz estable, pulsar
    Si hay menos de tres eventos naturales, se solicitan de cinco a ocho
    parpadeos voluntarios normales y se guardan como referencia secundaria.
 
-Cada etapa incluye una pausa previa de `preparation_seconds` (`2.0 s` por
-defecto). Durante `PREPARANDO` no se registran muestras; la captura comienza al
-cambiar a `CALIBRANDO`, lo que evita grabar la siguiente etapa mientras el
-usuario todavía está ajustando la apertura ocular.
+Después de cada etapa aceptada, el sistema queda en `CONFIRMAR` hasta recibir
+click izquierdo, `Espacio` o `Enter`. Luego aplica una pausa previa de
+`preparation_seconds` (`2.0 s` por defecto). Durante `PREPARANDO` no se
+registran muestras; la captura comienza al cambiar a `CALIBRANDO`, lo que evita
+grabar la siguiente etapa mientras el usuario todavía está ajustando la apertura
+ocular.
 
 Para cada etapa estática se guardan mediana izquierda, derecha y conjunta;
 desviación, MAD y percentiles; proporción válida; calidad y variación de pose.
@@ -703,6 +707,7 @@ Valores predeterminados:
 | --- | ---: | --- |
 | `duration_seconds` | `5.0 s` | Duración de O, S y D por separado |
 | `preparation_seconds` | `2.0 s` | Pausa antes de capturar cada etapa |
+| `require_stage_confirmation` | `true` | Exige click, Espacio o Enter entre etapas |
 | `min_samples` | `30` | Mínimo de cuadros válidos por perfil |
 | `quality_threshold` | `0.30` | Calidad facial mínima aceptada |
 | `min_valid_sample_ratio` | `0.65` | Cobertura mínima de muestras |
@@ -712,7 +717,8 @@ Valores predeterminados:
 | `max_ear_mad` | `0.025` | Desviación absoluta mediana máxima |
 | `max_head_angle_std_degrees` | `6°` | Movimiento máximo durante una etapa |
 | `max_eye_asymmetry_ratio` | `0.35` | Asimetría bilateral máxima |
-| `natural_blink_observation_seconds` | `8 s` | Observación natural |
+| `natural_blink_observation_seconds` | `60 s` | Observación natural de parpadeos |
+| `voluntary_blink_observation_seconds` | `60 s` | Respaldo de parpadeos voluntarios normales |
 | `min_natural_blinks` | `3` | Eventos naturales mínimos |
 | `min_voluntary_blinks` | `5` | Respaldo voluntario mínimo |
 | `profile_path` | `calibration_profile.json` | Perfil versionado persistente |

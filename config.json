@@ -154,6 +154,7 @@
   "calibration": {
     "duration_seconds": 5.0,
     "preparation_seconds": 2.0,
+    "require_stage_confirmation": true,
     "min_samples": 30,
     "quality_threshold": 0.3,
     "profile_path": "calibration_profile.json",
@@ -168,8 +169,8 @@
     "max_partial_eye_difference": 0.25,
     "min_possible_ear": 0.03,
     "max_possible_ear": 0.60,
-    "natural_blink_observation_seconds": 8.0,
-    "voluntary_blink_observation_seconds": 15.0,
+    "natural_blink_observation_seconds": 60.0,
+    "voluntary_blink_observation_seconds": 60.0,
     "min_natural_blinks": 3,
     "min_voluntary_blinks": 5,
     "calibration_blink_max_seconds": 1.2,
