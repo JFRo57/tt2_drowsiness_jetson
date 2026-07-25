@@ -425,6 +425,11 @@ y una iluminación similar a la de uso:
 5. El monitoreo comienza sólo cuando las etapas y el perfil completo son
    válidos. `O`, `S`, `D` y `B` permiten repetir únicamente la parte indicada.
 
+Antes de cada captura aparece `PREPARANDO` durante
+`calibration.preparation_seconds` (`2.0 s` por defecto). Usa esa pausa para
+colocar los ojos/postura de la etapa siguiente; las muestras no se guardan hasta
+que la pantalla cambia a `CALIBRANDO`.
+
 Cada etapa usa medianas izquierda, derecha y conjunta, dispersión, cobertura y
 estabilidad de pose. Debe cumplirse abierto > reducido > cerrado por ojo, con
 márgenes configurables y consistencia bilateral. Un fallo explica la etapa que

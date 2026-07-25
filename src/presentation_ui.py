@@ -186,14 +186,26 @@ class PresentationUI(object):
         }
         target = metrics.get("calibration_target", "")
         progress = max(0.0, min(1.0, float(metrics.get("calibration_progress", 0.0))))
+        preparing = bool(metrics.get("calibration_preparing", False))
+        remaining = float(metrics.get("calibration_prepare_remaining_seconds", 0.0))
+        mode = "PREPARANDO" if preparing else "CALIBRANDO"
+        message = metrics.get("calibration_message") or "Vehiculo detenido; no mueva la cabeza"
+        if len(message) > 92:
+            message = message[:89] + "..."
+        samples = int(metrics.get("calibration_valid_samples", 0) or 0)
+        attempts = int(metrics.get("calibration_sample_attempts", 0) or 0)
         width = max(120, view.shape[1] - 80)
-        cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 150), (15, 15, 15), -1)
-        cv2.putText(view, "CALIBRANDO: %s" % labels.get(target, target), (40, 98),
+        cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 174), (15, 15, 15), -1)
+        cv2.putText(view, "%s: %s" % (mode, labels.get(target, target)), (40, 98),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
-        cv2.putText(view, "Vehiculo detenido; no mueva la cabeza", (40, 124),
+        cv2.putText(view, message, (40, 124),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1)
-        cv2.rectangle(view, (40, 134), (40 + width, 145), (90, 90, 90), 1)
-        cv2.rectangle(view, (40, 134), (40 + int(width * progress), 145), (0, 220, 255), -1)
+        detail = ("Comienza en %.1f s" % remaining if preparing
+                  else "Muestras validas: %d / intentos: %d" % (samples, attempts))
+        cv2.putText(view, detail, (40, 148), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.46, (220, 220, 220), 1)
+        cv2.rectangle(view, (40, 158), (40 + width, 169), (90, 90, 90), 1)
+        cv2.rectangle(view, (40, 158), (40 + int(width * progress), 169), (0, 220, 255), -1)
 
     @staticmethod
     def _buzzer_label(gpio):

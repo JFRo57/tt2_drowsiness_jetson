@@ -153,6 +153,7 @@
   },
   "calibration": {
     "duration_seconds": 5.0,
+    "preparation_seconds": 2.0,
     "min_samples": 30,
     "quality_threshold": 0.3,
     "profile_path": "calibration_profile.json",

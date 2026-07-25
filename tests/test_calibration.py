@@ -1,9 +1,11 @@
 import json
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
-from src.application import default_config
+from src.application import DrowsinessApplication, default_config
 from src.calibration import CalibrationManager
 from src.fatigue_detector import FatigueDetector
 from src.presentation_ui import PresentationUI
@@ -49,6 +51,7 @@ class CalibrationManagerTests(unittest.TestCase):
         calibration.update({
             "profile_path": os.path.join(self.temp.name, "profile.json"),
             "duration_seconds": 0.20,
+            "preparation_seconds": 0.0,
             "min_samples": 3,
             "min_valid_sample_ratio": 0.60,
             "min_ear_gap": 0.015,
@@ -159,6 +162,26 @@ class CalibrationManagerTests(unittest.TestCase):
         self.assertIn("ABIERTO > REDUCIDO > CERRADO", self.manager.message)
         self.assertNotIn(result["failed_stage"], self.manager.profiles)
         self.assertEqual(result["failed_stage"], self.manager.next_required_stage())
+
+    def test_preparation_delay_does_not_sample_before_stage_capture(self):
+        self.manager.config["preparation_seconds"] = 0.30
+        self.manager.preparation_seconds = 0.30
+        self.manager.start("OPEN")
+
+        for _ in range(3):
+            self.assertIsNone(self.manager.update(measured(0.32)))
+            self.clock.advance(0.08)
+
+        status = self.manager.status_metrics()
+        self.assertTrue(status["calibration_preparing"])
+        self.assertEqual(0, status["calibration_valid_samples"])
+        self.assertEqual(0, status["calibration_sample_attempts"])
+
+        self.clock.advance(0.10)
+        self.assertIsNone(self.manager.update(measured(0.32)))
+        status = self.manager.status_metrics()
+        self.assertFalse(status["calibration_preparing"])
+        self.assertEqual(1, status["calibration_valid_samples"])
 
     def test_excessive_head_motion_rejects_stage(self):
         self.manager.start("OPEN")
@@ -271,6 +294,41 @@ class PresentationCalibrationKeyTests(unittest.TestCase):
         self.assertEqual(
             ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "FULL"], selected
         )
+
+
+class ApplicationCalibrationFlowTests(unittest.TestCase):
+    def test_full_sequence_advances_from_open_to_reduced(self):
+        temp = tempfile.TemporaryDirectory()
+        try:
+            clock = FakeClock()
+            config = default_config()
+            config["calibration"].update({
+                "profile_path": os.path.join(temp.name, "profile.json"),
+                "duration_seconds": 0.20,
+                "preparation_seconds": 0.0,
+                "min_samples": 3,
+                "min_valid_sample_ratio": 0.60,
+            })
+            app = DrowsinessApplication(config, simulation=True)
+            app.calibration.clock = clock
+
+            with redirect_stdout(io.StringIO()):
+                app.start_calibration("FULL")
+                result = None
+                for _ in range(5):
+                    result = app.calibration.update(measured(0.32)) or result
+                    clock.advance(0.06)
+
+                app._handle_calibration_result(result)
+
+            self.assertTrue(app.calibration.active)
+            self.assertEqual("REDUCED", app.calibration.active_profile)
+            self.assertEqual(
+                "O:OK R:-- C:--",
+                app.calibration.status_metrics()["calibration_profiles"],
+            )
+        finally:
+            temp.cleanup()
 
 
 if __name__ == "__main__":

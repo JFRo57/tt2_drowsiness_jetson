@@ -78,6 +78,7 @@ def default_config():
     }
     config["calibration"].update({
         "profile_path": "calibration_profile.json", "auto_start_if_missing": True,
+        "preparation_seconds": 2.0,
         "min_valid_sample_ratio": 0.65, "min_open_closed_gap": 0.06,
         "max_head_angle_std_degrees": 6.0,
         "max_eye_asymmetry_ratio": 0.35, "max_partial_eye_difference": 0.25,
@@ -166,6 +167,7 @@ class DrowsinessApplication(object):
         if self.face is not None:
             self.face.reset_eye_filter()
         self.calibration.start(profile)
+        print("CALIBRACION:", self.calibration.message)
 
     def run(self):
         exit_code = 0
@@ -402,6 +404,8 @@ class DrowsinessApplication(object):
     def _handle_calibration_result(self, result):
         if result is None:
             return
+        if result.get("reason"):
+            print("CALIBRACION:", result["reason"])
         if result.get("model_ready"):
             self.detector.apply_calibration(result)
             return
@@ -412,6 +416,7 @@ class DrowsinessApplication(object):
             if self.face is not None:
                 self.face.reset_eye_filter()
             self.calibration.start(next_stage)
+            print("CALIBRACION:", self.calibration.message)
 
     def _render_if_needed(self, metrics, frame=None):
         if not self.ui:

@@ -41,6 +41,9 @@ class CalibrationManager(object):
         self.config = config.get("calibration", {})
         self.clock = clock or time.monotonic
         self.duration = float(self.config.get("duration_seconds", 5.0))
+        self.preparation_seconds = max(
+            0.0, float(self.config.get("preparation_seconds", 0.0))
+        )
         self.min_samples = int(self.config.get("min_samples", 30))
         self.quality_threshold = float(self.config.get("quality_threshold", 0.30))
         self.min_valid_ratio = float(self.config.get("min_valid_sample_ratio", 0.65))
@@ -60,6 +63,8 @@ class CalibrationManager(object):
         self.active = False
         self.active_profile = None
         self.started = 0.0
+        self.capture_started = 0.0
+        self.preparing = False
         self.samples = []
         self.sample_attempts = 0
         self.progress = 0.0
@@ -119,12 +124,14 @@ class CalibrationManager(object):
         self.active = True
         self.active_profile = profile
         self.started = self.clock()
+        self.capture_started = self.started + self.preparation_seconds
+        self.preparing = self.preparation_seconds > 0.0
         self.samples = []
         self.sample_attempts = 0
         self.progress = 0.0
         self.last_result = None
         self.last_failed_stage = None
-        self.message = self.INSTRUCTIONS[profile]
+        self.message = self._stage_message(profile)
 
     def update(self, metrics):
         if not self.active:
@@ -133,6 +140,8 @@ class CalibrationManager(object):
             return self._update_dynamic(metrics)
 
         now = self.clock()
+        if self._preparation_active(now):
+            return None
         self.sample_attempts += 1
         self.progress = min(1.0, (now - self.started) / max(0.1, self.duration))
         sample = self._extract_sample(metrics, require_quality=True)
@@ -231,10 +240,15 @@ class CalibrationManager(object):
                 "OK" if profile in self.profiles else "--"))
         blink_count = (len(self.dynamic_natural_events) if self.dynamic_mode == "NATURAL"
                        else len(self.dynamic_voluntary_events))
+        prepare_remaining = 0.0
+        if self.active and self.preparing:
+            prepare_remaining = max(0.0, self.capture_started - self.clock())
         return {
             "calibration_active": self.active,
             "calibration_target": self.active_profile or "",
             "calibration_progress": self.progress if self.active else 0.0,
+            "calibration_preparing": bool(self.active and self.preparing),
+            "calibration_prepare_remaining_seconds": prepare_remaining,
             "calibration_ready": self.ready_for_monitoring(),
             "calibration_static_ready": self.static_ready,
             "calibration_profiles": " ".join(status),
@@ -418,15 +432,19 @@ class CalibrationManager(object):
         self.active_profile = ("DYNAMIC_NATURAL" if self.dynamic_mode == "NATURAL"
                                else "DYNAMIC_VOLUNTARY")
         self.started = self.clock()
+        self.capture_started = self.started + self.preparation_seconds
+        self.preparing = self.preparation_seconds > 0.0
         self.progress = 0.0
         self.sample_attempts = 0
         self.dynamic_state = "OPEN"
         self.dynamic_event = None
         self.dynamic_invalid = False
-        self.message = self.INSTRUCTIONS[self.active_profile]
+        self.message = self._stage_message(self.active_profile)
 
     def _update_dynamic(self, metrics):
         now = self.clock()
+        if self._preparation_active(now):
+            return None
         self.sample_attempts += 1
         duration = (float(self.config.get("natural_blink_observation_seconds", 8.0))
                     if self.dynamic_mode == "NATURAL" else
@@ -462,6 +480,40 @@ class CalibrationManager(object):
                   "reason": self.message}
         self.last_result = result
         return result
+
+    def _stage_message(self, profile):
+        instruction = self.INSTRUCTIONS.get(profile, "Siga la instruccion de calibracion")
+        if self.preparing:
+            return "Preparese para %s: %s" % (
+                self.PROFILE_LABELS.get(profile, profile), instruction,
+            )
+        return instruction
+
+    def _preparation_active(self, now):
+        if not self.preparing:
+            return False
+        if now < self.capture_started:
+            remaining = max(0.0, self.capture_started - now)
+            self.progress = 0.0
+            self.message = "Preparese para %s en %.1f s: %s" % (
+                self.PROFILE_LABELS.get(self.active_profile, self.active_profile),
+                remaining,
+                self.INSTRUCTIONS.get(self.active_profile, "Siga la instruccion"),
+            )
+            return True
+        self.preparing = False
+        self.started = now
+        self.capture_started = now
+        self.samples = []
+        self.sample_attempts = 0
+        self.progress = 0.0
+        self.dynamic_state = "OPEN"
+        self.dynamic_event = None
+        self.dynamic_invalid = False
+        self.message = self.INSTRUCTIONS.get(
+            self.active_profile, "Siga la instruccion de calibracion"
+        )
+        return False
 
     def _update_dynamic_blink(self, metrics, now):
         sample = self._extract_sample(metrics, require_quality=True)
