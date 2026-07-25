@@ -17,19 +17,23 @@ Se construyo una aplicacion modular en Python con los siguientes componentes:
 - `src/face_detector.py`: selecciona dlib CNN CUDA, OpenCV DNN CUDA FP16 o
   dlib HOG CPU, con fallback automatico y telemetria del backend activo.
 - `src/face_analyzer.py`: estima 68 puntos faciales, estabiliza ROI y landmarks,
-  calcula EAR crudo/filtrado, MAR, pose, mirada, brillo y confiabilidad ocular.
-- `src/fatigue_detector.py`: aplica histéresis, confirmación temporal y retención
-  de observaciones no confiables antes de convertir las métricas en estados
-  como `NORMAL`, `PARPADEO`, `POSIBLE_SOMNOLENCIA`, `ALERTA`,
-  `ALERTA_CRITICA` y `ROSTRO_NO_DETECTADO`.
-- `src/calibration.py`: captura tres perfiles personales de sesion (ojos
-  abiertos, posible somnolencia y dormido), calcula umbrales EAR robustos y
-  clasifica cada frame usando EAR, MAR, pose y mirada.
+  calcula EAR por ojo, MAR, pose, mirada, brillo, nitidez y confiabilidad.
+- `src/temporal_events.py`: normaliza el cierre por ojo, reconoce ciclos de
+  parpadeo/bostezo/cabeceo y mantiene ventanas incrementales rápidas, medias y
+  largas, incluida PERCLOS con cobertura válida.
+- `src/vision_reliability.py`: mantiene la máquina paralela de disponibilidad
+  de medición, separada del estado de somnolencia.
+- `src/fatigue_detector.py`: fusiona eventos débiles, fuertes y críticos con
+  temporización monotónica, memoria e histéresis en `CALIBRACION`, `ALERTA`,
+  `SOSPECHA`, `SOMNOLENCIA`, `CRITICO` y `RECUPERACION`.
+- `src/calibration.py`: captura tres referencias geométricas por ojo y un basal
+  dinámico de parpadeos, valida calidad y persiste un perfil versionado.
 - `src/alert_controller.py`: traduce estados de fatiga a patrones de LEDs y tonos PWM para buzzer pasivo.
 - `src/gpio_controller.py`: controla GPIO fisico en Jetson o modo simulado, incluyendo PWM para buzzer pasivo.
 - `src/mode_controller.py`: administra los modos `AUTOMATIC`, `MAINTENANCE` y `EMERGENCY`.
 - `src/presentation_ui.py`: muestra la interfaz grafica con video, landmarks, metricas, estado, LEDs virtuales y atajos de teclado.
-- `src/event_logger.py`: registra transiciones de estado en CSV cuando el logging esta habilitado.
+- `src/event_logger.py`: registra en CSV, con buffer, transiciones, eventos,
+  métricas temporales, visión y salida de alertas.
 - `src/shutdown_manager.py`: maneja cierre por `Ctrl+C`, `SIGTERM`, tecla de salida o cierre de ventana.
 
 Los modelos se instalan localmente con `scripts/setup_v3_models.sh`: predictor
@@ -50,8 +54,9 @@ Los ultimos cambios del proyecto quedaron concentrados principalmente en la logi
 - Se agregaron controles por teclado para simular los tres modos: `1` automatico, `2` mantenimiento y `3` paro de emergencia.
 - Se agrego reconexion basica de camara con `reconnect_attempts`.
 - Se agrego medicion separada de FPS de captura y FPS de analisis.
-- Se agrego periodo de recuperacion despues de alertas mediante `recovery_seconds`.
-- Se agrego deteccion temporal de parpadeos, bostezos, cabeceo, mirada desviada y rostro no detectado.
+- Se agregaron escalas de 3, 25 y 60 segundos con colas acotadas y tiempo
+  monotónico, independientes de los FPS.
+- Se separaron medición, normalización, eventos, métricas, decisión y actuadores.
 - La captura entrega BGRx directamente desde `nvvidconv`, eliminando
   `videoconvert` del camino CPU.
 - La deteccion facial usa GPU CUDA y cambia automaticamente a un respaldo si
@@ -64,10 +69,13 @@ Los ultimos cambios del proyecto quedaron concentrados principalmente en la logi
 - Se agregó validación ocular por nitidez, tamaño, simetría entre ojos, calidad
   facial y yaw. Los cuadros no confiables se retienen brevemente y no se
   interpretan automáticamente como ojos abiertos.
-- La calibración O/S/D dura 5 segundos por perfil, usa estadísticas robustas y
-  rechaza perfiles inestables, desordenados o excesivamente superpuestos.
+- La calibración abierto/reducido/cerrado usa medianas por ojo, cobertura,
+  dispersión y pose; después obtiene el basal de parpadeos natural o voluntario.
+- El perfil válido se guarda de forma atómica y un intento fallido no lo
+  sobrescribe; la observación iniciada bloquea el monitoreo hasta completarse.
 - La interfaz muestra umbrales de cierre/apertura y diagnóstico de señal ocular
-  para poder distinguir somnolencia real de desenfoque u oclusión.
+  para poder distinguir un patrón temporal compatible con fatiga visual de
+  desenfoque u oclusión.
 
 Nota: `switch.debounce_ms` y `switch.center_mode` ya existen en `config.json`. En la implementacion actual la lectura del switch usa entradas con pull-up/pull-down de Jetson.GPIO, pero no aplica una rutina de debounce por software; la posicion central se interpreta como `MAINTENANCE`, que coincide con el valor configurado actualmente.
 
@@ -83,8 +91,12 @@ flowchart LR
     Backend --> FaceAnalyzer[FaceAnalyzer 68 landmarks]
     Backend -. fallback .-> Reserva[OpenCV CUDA FP16 o HOG CPU]
     Reserva --> FaceAnalyzer
-    FaceAnalyzer --> Stability[ROI y landmarks estabilizados<br/>EAR crudo filtrado y calidad ocular]
-    Stability --> FatigueDetector[FatigueDetector]
+    FaceAnalyzer --> Raw[EAR por ojo MAR pose y calidad]
+    Raw --> Normalizer[Cierre normalizado por ojo]
+    Normalizer --> Events[Eventos y ventanas 3 25 60 s]
+    Raw --> Vision[Confiabilidad de vision]
+    Events --> FatigueDetector[Maquina de somnolencia]
+    Vision --> FatigueDetector
     Switch[Switch 3 estados] --> GPIOController[GPIOController]
     GPIOController --> ModeController[ModeController]
     ModeController --> App
@@ -111,8 +123,9 @@ flowchart TD
     I --> J[Detectar rostro y landmarks crudos]
     J --> K[Estabilizar ROI y landmarks]
     K --> Q[Calcular metricas y validar señal ocular]
-    Q --> R[Filtrar EAR y confirmar cierre o apertura]
-    R --> L[Evaluar fatiga y transiciones]
+    Q --> R[Normalizar cierre por ojo y actualizar vision]
+    R --> S[Reconocer eventos y ventanas temporales]
+    S --> L[Fusionar evidencia y evaluar transiciones]
     G --> M[Actualizar alertas]
     H --> M
     L --> M
@@ -152,101 +165,84 @@ flowchart TD
 
 ## Estados principales
 
-- `NORMAL`: indicadores dentro de rango.
-- `CALIBRANDO`: captura supervisada de uno de los perfiles O, S o D.
-- `PARPADEO`: cierre ocular breve dentro del rango esperado de parpadeo.
-- `POSIBLE_SOMNOLENCIA`: advertencia preventiva por cierre sostenido, PERCLOS alto, bostezo con evidencia secundaria, cabeceo o mirada desviada.
-- `ALERTA`: cierre ocular prolongado o PERCLOS de alerta.
-- `ALERTA_CRITICA`: cierre ocular critico.
-- `ROSTRO_NO_DETECTADO`: no se detecta rostro durante el tiempo configurado.
+- `CALIBRACION`: no existe todavía un perfil completo y válido; las alertas de
+  somnolencia permanecen desactivadas.
+- `ALERTA`: vigilancia normal respecto al basal personal.
+- `SOSPECHA`: evidencia temprana, ambigua o multimodal que debe observarse.
+- `SOMNOLENCIA`: patrón temporal consistente de deterioro visual.
+- `CRITICO`: cierre ocular crítico o combinación grave compatible con una
+  posible pérdida momentánea de vigilancia. No es confirmación clínica.
+- `RECUPERACION`: observación pegajosa posterior a un estado crítico.
 - `MANTENIMIENTO`: modo de mantenimiento, con alerta auditiva suspendida.
 - `PARO_EMERGENCIA`: modo de paro de emergencia.
 - `ERROR`: fallo no recuperable durante ejecucion.
+
+En paralelo se informa `INICIALIZANDO`, `VISION_VALIDA`, `VISION_DEGRADADA`,
+`ROSTRO_NO_VISIBLE` o `CAMARA_OBSTRUIDA_O_FALLO`. Estos estados describen la
+medición, no la fatiga.
 
 ### Diagrama de la maquina de estados
 
 ```mermaid
 stateDiagram-v2
     direction LR
-    state "INICIALIZANDO" as INIT
-    state "MANTENIMIENTO" as MAINT
-    state "PARO_EMERGENCIA" as STOP
-    state "ERROR" as ERROR
-
-    [*] --> INIT
-    INIT --> AUTO: inicio correcto
-    INIT --> ERROR: excepcion
-
-    state "MODO AUTOMATICO" as AUTO {
-        [*] --> EVAL
-        state "Evaluar frame por prioridad" as EVAL
-        state EVAL <<choice>>
-        state "CALIBRANDO" as CAL
-        state "ROSTRO_NO_DETECTADO" as NOFACE
-        state "PARPADEO" as BLINK
-        state "ALERTA_CRITICA" as CRITICAL
-        state "ALERTA" as ALERT
-        state "POSIBLE_SOMNOLENCIA" as POSSIBLE
-        state "NORMAL" as NORMAL
-
-        EVAL --> CAL: tecla O, S o D
-        CAL --> EVAL: captura terminada (valida o invalida)
-
-        EVAL --> NOFACE: sin rostro >= 2.0 s
-        EVAL --> BLINK: cierre confirmado >= 0.08 s<br/>y menor al nivel preventivo
-        EVAL --> CRITICAL: cierre o ASLEEP >= 1.60 s
-        EVAL --> ALERT: cierre o ASLEEP >= 0.85 s<br/>o PERCLOS >= 0.35
-        EVAL --> POSSIBLE: cierre o ASLEEP >= 0.45 s<br/>DROWSY >= 0.80 s<br/>PERCLOS >= 0.25<br/>bostezo, cabeceo o mirada desviada
-        EVAL --> NORMAL: indicadores dentro de rango<br/>o sin rostro entre 0.25 y 2.0 s
-
-        NOFACE --> EVAL: siguiente frame
-        BLINK --> EVAL: siguiente frame
-        CRITICAL --> EVAL: siguiente frame
-        ALERT --> EVAL: siguiente frame
-        POSSIBLE --> EVAL: siguiente frame
-        NORMAL --> EVAL: siguiente frame
-    }
-
-    AUTO --> MAINT: mode = MAINTENANCE
-    MAINT --> AUTO: mode = AUTOMATIC
-    AUTO --> STOP: mode = EMERGENCY
-    MAINT --> STOP: mode = EMERGENCY
-    STOP --> AUTO: mode = AUTOMATIC
-    STOP --> MAINT: mode = MAINTENANCE
-
-    AUTO --> ERROR: fallo no recuperable
-    MAINT --> ERROR: fallo no recuperable
-    STOP --> ERROR: fallo no recuperable
-    ERROR --> [*]: cleanup
+    [*] --> CALIBRACION
+    CALIBRACION --> ALERTA: perfil completo y valido
+    ALERTA --> SOSPECHA: una fuerte o dos debiles multimodales
+    SOSPECHA --> SOMNOLENCIA: fuerte persistente o varias fuertes
+    SOMNOLENCIA --> SOSPECHA: estabilidad prolongada
+    SOSPECHA --> ALERTA: estabilidad prolongada
+    ALERTA --> CRITICO: evidencia critica
+    SOSPECHA --> CRITICO: evidencia critica
+    SOMNOLENCIA --> CRITICO: evidencia critica
+    RECUPERACION --> CRITICO: recaida critica
+    CRITICO --> RECUPERACION: vision valida ojos abiertos cabeza neutral
+    RECUPERACION --> SOMNOLENCIA: patron fuerte
+    RECUPERACION --> SOSPECHA: observacion estable
 ```
 
-En el diagrama, `EVAL` no es un estado visible de la interfaz; representa la
-decision ejecutada en cada frame. Las condiciones se comprueban en el orden
-implementado por `FatigueDetector`: modo, presencia del rostro, parpadeo,
-cierre critico, alerta, posible somnolencia, PERCLOS, evidencias secundarias,
-recuperacion y finalmente `NORMAL`. Debido a esta reevaluacion, un estado puede
-saltar directamente a otro si las metricas del frame ya cumplen una condicion
-de mayor prioridad.
+Un evento crítico interrumpe cualquier permanencia mínima. `CRITICO` nunca baja
+directamente a `ALERTA`: exige visión válida, ojos abiertos y cabeza neutral,
+pasa a `RECUPERACION`, después a `SOSPECHA` y finalmente a `ALERTA`. La pérdida
+de visión conserva el estado previo sin inventar cierre ni acumular PERCLOS.
 
-Antes de `EVAL` existe una submáquina ocular. El cierre debe permanecer al
-menos `close_confirm_seconds=0.08`; la reapertura debe superar el umbral de
-apertura durante `open_confirm_seconds=0.15`. Los dos umbrales están separados
-por `ear_hysteresis`, por lo que una oscilación alrededor del límite no alterna
-el estado en cada frame. El panel resume esta etapa como `ABIERTO`,
-`CONFIRMANDO_CIERRE`, `CERRADO`, `CONFIRMANDO_APERTURA`, `RETENIDO` o
-`NO_CONFIABLE`.
+| Origen | Destino | Condición resumida |
+| --- | --- | --- |
+| Cualquier estado operativo | `CRITICO` | Cierre profundo continuo, cierre con caída de cabeza, cabeceo con ojos cerrados o repetición grave |
+| `ALERTA` | `SOSPECHA` | Una evidencia fuerte o dos débiles de modalidades diferentes |
+| `ALERTA` | `SOMNOLENCIA` | Al menos dos evidencias fuertes simultáneas |
+| `SOSPECHA` | `SOMNOLENCIA` | Dos fuertes o una fuerte persistente durante el tiempo configurado |
+| `SOMNOLENCIA` | `SOSPECHA` | Ausencia estable de evidencia durante `somnolence_clear_seconds` |
+| `CRITICO` | `RECUPERACION` | Retención mínima cumplida, visión válida, apertura y postura neutrales sostenidas |
+| `RECUPERACION` | `SOMNOLENCIA` | Reaparece una evidencia fuerte no crítica |
+| `RECUPERACION` | `SOSPECHA` | Estabilidad durante la ventana de observación |
+| `SOSPECHA` | `ALERTA` | Estabilidad sostenida durante `suspicion_clear_seconds` |
 
-Un cuadro ocular no confiable o una pérdida de rostro de hasta 0.25 s conserva
-el estado previo y no reinicia un cierre sostenido. Si el rostro continúa
-ausente, el detector vuelve temporalmente a `NORMAL` hasta llegar a 2.0 s,
-cuando entra en `ROSTRO_NO_DETECTADO`. La retención corta evita que una
-vibración puntual cancele un microsueño; no inventa datos durante una oclusión
-prolongada.
+No se usa una suma ilimitada de puntos. Cada evento se clasifica por modalidad
+y severidad; las colas temporales caducan y una señal débil repetida no puede
+dominar indefinidamente. Dos evidencias débiles sólo cuentan si pertenecen a
+modalidades diferentes.
 
-Cuando desaparecen las condiciones de riesgo, `recovery_since` se fija una sola
-vez y el nivel anterior se conserva durante `recovery_seconds` (1.0 s en la
-configuracion actual). Una nueva evidencia de riesgo cancela ese conteo; al
-desaparecer nuevamente, comienza un periodo completo desde cero.
+### Máquina paralela de visión
+
+```mermaid
+stateDiagram-v2
+    [*] --> INICIALIZANDO
+    INICIALIZANDO --> VISION_VALIDA: medicion completa estable
+    INICIALIZANDO --> VISION_DEGRADADA: informacion parcial
+    VISION_VALIDA --> VISION_DEGRADADA: un ojo pose calidad luz o FPS
+    VISION_DEGRADADA --> VISION_VALIDA: calidad recuperada
+    VISION_DEGRADADA --> ROSTRO_NO_VISIBLE: ausencia sostenida
+    ROSTRO_NO_VISIBLE --> VISION_VALIDA: rostro y ojos recuperados
+    ROSTRO_NO_VISIBLE --> CAMARA_OBSTRUIDA_O_FALLO: perdida persistente
+```
+
+Con un único ojo fiable se permite una medición degradada si
+`allow_single_eye=true`, pero por defecto no se genera evidencia crítica a
+partir de un solo ojo. Sin ojos válidos, el tiempo de cierre y PERCLOS no
+avanzan. Una pérdida persistente se reporta como fallo de supervisión: con los
+datos actuales no es posible distinguir de forma fiable una cámara tapada de
+un asiento vacío.
 
 
 ## Modos de operacion
@@ -412,7 +408,7 @@ Nota importante: `requirements.txt` esta vacio actualmente. Eso significa que la
 Desde la carpeta del proyecto:
 
 ```bash
-cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v4
 source .venv/bin/activate
 ```
 
@@ -523,12 +519,14 @@ Teclas disponibles:
 - `1`: cambiar a modo automatico simulado.
 - `2`: cambiar a modo mantenimiento simulado.
 - `3`: cambiar a modo paro de emergencia simulado.
-- `O`: calibrar el perfil de ojos abiertos.
-- `S`: calibrar el perfil de posible somnolencia.
-- `D`: calibrar el perfil dormido, con ojos cerrados y su postura asociada.
-- `C`: alias compatible de `O`.
+- `C`: iniciar de nuevo la secuencia completa.
+- `O`: repetir la etapa de ojos normalmente abiertos.
+- `S`: repetir la etapa de apertura ocular reducida.
+- `D`: repetir la etapa de ojos completamente cerrados.
+- `B`: repetir la observacion dinámica de parpadeos.
 - `L`: mostrar u ocultar landmarks.
 - `I`: mostrar u ocultar panel de informacion.
+- `V`: activar o desactivar el overlay de depuracion.
 - `M`: silenciar o reactivar buzzer.
 - `P`: pausar o reanudar visualizacion.
 - `R`: reiniciar metricas temporales del detector.
@@ -536,27 +534,30 @@ Teclas disponibles:
 
 ### Calibracion
 
-Con el vehiculo detenido, la camara en su posicion final y luz estable:
+Con el vehiculo detenido, la camara en su posicion final y luz estable, pulsar
+`C` y seguir las instrucciones:
 
-1. Presionar `O` y mirar al frente con ojos abiertos y postura normal durante
-   aproximadamente 5 segundos.
-2. Presionar `S` y representar posible somnolencia durante 5 segundos, con
-   parpados entrecerrados, expresion relajada e inclinacion ligera.
-3. Presionar `D` y mantener los ojos cerrados junto con la postura de cabeza
-   que se desea reconocer como dormida durante 5 segundos.
-4. Confirmar que el panel muestre `O:OK S:OK D:OK`. El clasificador queda
-   activo a partir del siguiente frame.
+1. Mirar al frente con postura natural y ojos normalmente abiertos, sin
+   exagerar su apertura.
+2. Mantener los parpados parcialmente cerrados, sin cerrarlos por completo.
+   `APERTURA_OCULAR_REDUCIDA` es sólo una referencia geométrica intermedia.
+3. Cerrar los ojos de forma natural. La captura continua obtiene múltiples
+   muestras y no depende del último cuadro.
+4. Mirar al frente de forma natural durante la fase dinámica. Se aceptan ciclos
+   completos abierto→cerrado→abierto, sin pérdida facial ni movimiento excesivo.
+   Si hay menos de tres eventos naturales, se solicitan de cinco a ocho
+   parpadeos voluntarios normales y se guardan como referencia secundaria.
 
-El panel tambien presenta:
+Para cada etapa estática se guardan mediana izquierda, derecha y conjunta;
+desviación, MAD y percentiles; proporción válida; calidad y variación de pose.
+La validación exige, por ojo, `EAR_abierto > EAR_reducido > EAR_cerrado`, margen
+mínimo entre vecinos, separación abierta/cerrada, muestras suficientes,
+cobertura, estabilidad de cabeza, rango EAR posible y consistencia bilateral.
+El mensaje identifica la etapa fallida para repetirla sin conservar sus datos.
 
-- perfil que se esta capturando y porcentaje de progreso;
-- perfiles terminados;
-- perfil detectado, confianza y tiempo sostenido;
-- umbrales EAR calculados para somnolencia y ojos cerrados.
-
-Las muestras de baja calidad no se guardan. El modelo exige una separacion EAR
-minima y el orden abierto > somnoliento > dormido; un conjunto superpuesto o
-inestable se rechaza para reducir clasificaciones ambiguas.
+La fase dinámica guarda duración mediana, percentiles 75 y 90, dispersión,
+descenso, reapertura, EAR mínimo y número de parpadeos. Un ciclo incompleto o
+ocurrido durante pérdida de rostro se rechaza.
 
 La calibracion es individual y no asigna umbrales por etnia. Aprende la
 geometria ocular de la persona concreta, incluida la forma del parpado, la
@@ -569,9 +570,11 @@ prototipo de asistencia y no sustituye detenerse en un lugar seguro cuando el
 conductor presenta somnolencia.
 
 dlib no cambia ni se reentrena durante este proceso: extrae los landmarks. El
-clasificador personal de sesion utiliza EAR, MAR, pitch, yaw, roll y mirada para
-comparar cada frame contra los tres perfiles. Los perfiles solo se mantienen en
-memoria y deben capturarse de nuevo despues de reiniciar el programa.
+cierre de cada ojo se calcula como `(EAR_abierto - EAR_actual) /
+(EAR_abierto - EAR_cerrado)` y se limita a `[0,1]`; la etapa reducida valida y
+personaliza la zona intermedia. El perfil versión 2 guarda ojos, basal de
+parpadeo, pose neutral, calidad y fecha en `calibration_profile.json`. La
+escritura es atómica y un intento fallido nunca sobrescribe el perfil previo.
 
 Si falla una captura, revisar el encuadre, la iluminacion y la calidad del
 rostro antes de repetir el perfil.
@@ -595,7 +598,7 @@ El archivo `config.json` concentra los parametros del sistema.
 - `detection_interval_frames`: cada cuantos frames se redetecta el rostro.
 - `no_face_detection_interval_frames`: separacion de busquedas cuando no hay rostro.
 - `detector_scale`: escala usada por los detectores dlib CNN y HOG.
-- `tracking_mode`: seguimiento entre redetecciones; V3 usa `landmarks`.
+- `tracking_mode`: seguimiento entre redetecciones; V4 usa `landmarks`.
 - `pose_interval_frames` y `gaze_interval_frames`: frecuencia de esas
   caracteristicas secundarias.
 
@@ -617,23 +620,30 @@ El archivo `config.json` concentra los parametros del sistema.
 
 ### Fatiga
 
-Antes de aplicar estos tiempos, la señal ocular usa mediana temporal,
-histéresis y confirmación de estado. Por ello un cuadro aislado no reinicia un
-cierre sostenido.
+La lógica usa cierre normalizado personal; `ear_threshold` permanece sólo para
+compatibilidad y diagnóstico. Sin perfil válido el estado es `CALIBRACION` y
+no se decide fatiga. Los siguientes valores son puntos de partida de ingeniería
+para ensayos controlados, no umbrales médicos:
 
-- `ear_threshold`: umbral de respaldo antes de completar la calibración. Con
-  `use_session_calibration=true`, el límite de cierre se deriva de O/S/D.
-- El umbral de apertura se genera a partir del umbral de cierre y
-  `stability.ear_hysteresis`; no se copia de otro conductor.
-- `prealert_closed_seconds`: segundos para advertencia preventiva.
-- `alert_closed_seconds`: segundos para alerta.
-- `critical_closed_seconds`: segundos para alerta critica.
-- `perclos_window_seconds`: ventana temporal para PERCLOS.
-- `perclos_warning_threshold` y `perclos_alert_threshold`: umbrales de PERCLOS.
-- `mar_threshold`: umbral de bostezo.
-- `head_nod_pitch_threshold`: umbral de cabeceo por inclinacion.
-- `gaze_away_warning_seconds`: tiempo de mirada desviada para advertencia.
-- `no_face_warning_seconds`: tiempo sin rostro para advertencia.
+| Grupo | Parámetros iniciales |
+| --- | --- |
+| Un ojo | `allow_single_eye=true`; `single_eye_critical_enabled=false` |
+| Ciclo ocular | inicio `0.35`; cerrado `0.75`; reapertura `0.25` |
+| Cierre profundo | nivel `0.80`; sostenido `0.8 s`; grave `1.2 s`; crítico `2.0 s` |
+| Parpadeo prolongado | límite absoluto `0.55 s`; multiplicador personal `1.8` sobre p90 |
+| Ventanas | rápida `3 s`; media `25 s`; larga/PERCLOS `60 s` |
+| PERCLOS | cobertura mínima `0.65`; tiempo válido mínimo `15 s` |
+| Boca | normal/cierre `0.38`; abierta `0.48`; amplia `0.65`; sostenida `0.65 s` |
+| Cabeza relativa | abajo `18°`; recuperación `8°`; lateral `28°`; caída `28°/s`; abajo `0.8 s` |
+| Subida | evidencia fuerte persistente `4 s` o varias fuertes |
+| Descenso | `SOMNOLENCIA` estable `10 s`; `SOSPECHA` estable `8 s` |
+| Crítico/recuperación | retención `2 s`; apertura `2 s`; observación `8 s` |
+
+El evento de parpadeo sigue `ABIERTO → CERRANDO → CERRADO → ABRIENDO →
+ABIERTO`; el bostezo sigue boca normal, apertura progresiva, apertura amplia
+sostenida, cierre y vuelta a normal. El cabeceo requiere diferencia respecto a
+pose neutral, velocidad, permanencia abajo y recuperación. Una apertura breve
+de boca o un movimiento aislado de cabeza es evidencia débil.
 
 ### Estabilidad en vehículo
 
@@ -647,9 +657,9 @@ detección de cierres reales:
   su forma local se filtra para evitar que los puntos "respiren" alrededor de
   los párpados.
 - `ear_median_window=3` elimina un outlier conservando baja latencia.
-- `ear_hysteresis`, `close_confirm_seconds` y `open_confirm_seconds` forman una
-  máquina ocular con umbrales distintos para cerrar y abrir. La apertura exige
-  más persistencia para que uno o dos cuadros falsos no corten un microsueño.
+- `ear_hysteresis`, `close_confirm_seconds` y `open_confirm_seconds` estabilizan
+  la medición heredada; la máquina nueva usa además niveles normalizados y un
+  ciclo explícito para evitar eventos por cuadro.
 - Observaciones borrosas, asimetrías extremas o giros laterales se marcan como
   no confiables. Durante `unreliable_hold_seconds` se conserva el estado previo
   en vez de interpretar el cuadro como ojos abiertos.
@@ -687,17 +697,37 @@ Valores predeterminados:
 | `duration_seconds` | `5.0 s` | Duración de O, S y D por separado |
 | `min_samples` | `30` | Mínimo de cuadros válidos por perfil |
 | `quality_threshold` | `0.30` | Calidad facial mínima aceptada |
+| `min_valid_sample_ratio` | `0.65` | Cobertura mínima de muestras |
 | `min_ear_gap` | `0.02` | Separación EAR mínima entre perfiles vecinos |
+| `min_open_closed_gap` | `0.06` | Separación mínima total abierto/cerrado |
 | `max_ear_std` | `0.035` | Desviación estándar EAR máxima |
 | `max_ear_mad` | `0.025` | Desviación absoluta mediana máxima |
-| `max_profile_overlap_ratio` | `0.65` | Solapamiento máximo entre distribuciones EAR |
-| `max_profile_distance` | `4.0` | Distancia normalizada máxima de clasificación |
-| `profile_min_confidence` | `0.35` | Confianza mínima usada por el detector temporal |
-| `profile_warning_seconds` | `0.80 s` | Persistencia de perfil somnoliento para advertir |
+| `max_head_angle_std_degrees` | `6°` | Movimiento máximo durante una etapa |
+| `max_eye_asymmetry_ratio` | `0.35` | Asimetría bilateral máxima |
+| `natural_blink_observation_seconds` | `8 s` | Observación natural |
+| `min_natural_blinks` | `3` | Eventos naturales mínimos |
+| `min_voluntary_blinks` | `5` | Respaldo voluntario mínimo |
+| `profile_path` | `calibration_profile.json` | Perfil versionado persistente |
 
-`feature_scales` normaliza EAR (`0.04`), MAR (`0.15`), pitch (`12°`), yaw
-(`15°`) y roll (`15°`). Las estadísticas centrales se calculan con medianas y
-MAD/percentiles para que unos pocos cuadros atípicos no definan el umbral.
+Las estadísticas centrales usan medianas, MAD y percentiles para que unos
+pocos cuadros atípicos no definan el perfil.
+
+### Confiabilidad de vision
+
+`vision_reliability` centraliza `min_quality=0.25`, brillo `[12,250]`, pose
+máxima de `42°` pitch y `35°` roll, mínimo `8 FPS` con gracia de `3 s`, rostro
+no visible a `2 s`, pérdida persistente a `8 s` y falta de cuadros a `6 s`.
+Durante visión degradada se marca cobertura parcial, se conservan los estados
+de riesgo y se excluyen de PERCLOS los intervalos no medibles.
+
+### PERCLOS temporal
+
+`PerclosWindow` integra segmentos por tiempo monotónico. Mantiene tiempo total,
+válido y profundamente cerrado; `PERCLOS = cerrado_profundo / valido` y
+`cobertura = valido / total`. Excluye calibración, pausa, cuadros duplicados,
+pose inválida y mediciones sin ojos. No se declara confiable antes de alcanzar
+la cobertura y duración válidas configuradas, y nunca es el único criterio de
+decisión.
 
 ### GPIO
 
@@ -810,31 +840,32 @@ Backends disponibles:
 - `software_pwm`: se conserva para diagnostico, pero no es adecuado para la
   ejecucion principal con vision activa.
 
-Asignacion de niveles:
-
-- Nivel de alerta 1: estado `POSIBLE_SOMNOLENCIA`.
-- Nivel de alerta 2: estado `ALERTA`.
-- Nivel de alerta 3: estado `ALERTA_CRITICA`.
+Prioridad operativa: fallo de supervisión, `CRITICO`, `SOMNOLENCIA`,
+`SOSPECHA` y `ALERTA`. Un único `AlertController` arbitra LEDs y buzzer; ninguna
+capa de detección escribe directamente a GPIO.
 
 Patrones implementados:
 
-- Nivel 1: `2500 Hz`, `200 ms ON`, `1000 ms OFF`, `3` repeticiones.
-  Despues queda en silencio hasta que cambie el estado.
-- Nivel 2: `3500 Hz`, `200 ms ON`, `300 ms OFF`, `3` repeticiones;
-  pausa de `900 ms` y repeticion mientras continue la condicion.
-- Nivel 3: `4500 Hz`, `150 ms ON`, `150 ms OFF`, `5` repeticiones;
-  pausa de `600 ms` y repeticion mientras continue la condicion.
+- `SOSPECHA`: `2500 Hz`, `200 ms ON` en ciclo de `1.2 s`, sólo durante los
+  primeros `3 s` del aviso.
+- `SOMNOLENCIA`: `3500 Hz`, tres pulsos de `200 ms` separados dentro de un
+  grupo de `1.5 s`, con pausa hasta completar `2.4 s`.
+- `CRITICO`: `4500 Hz`, cinco pulsos de `150 ms` en `1.5 s`, con pausa hasta
+  completar `2.1 s` y repetición prioritaria.
+- Supervisión: `3000 Hz`, `250 ms` por ciclo de `2 s`, distinto de fatiga.
 
 ### Patrones de alerta
 
 | Estado | LED verde | LED amarillo | LED rojo | Buzzer |
 | --- | --- | --- | --- | --- |
 | `INICIALIZANDO` | Secuencia | Secuencia | Secuencia | Apagado |
-| `NORMAL` / `PARPADEO` | Encendido | Apagado | Apagado | Apagado |
-| `POSIBLE_SOMNOLENCIA` | Apagado | Parpadeo lento | Apagado | Nivel 1: 2500 Hz, 200 ms ON / 1000 ms OFF, 3 repeticiones |
-| `ROSTRO_NO_DETECTADO` | Apagado | Parpadeo rapido | Apagado | Apagado |
-| `ALERTA` | Apagado | Apagado | Parpadeo medio | Nivel 2: 3500 Hz, 200 ms ON / 300 ms OFF, 3 repeticiones, pausa 900 ms |
-| `ALERTA_CRITICA` | Apagado | Apagado | Parpadeo rapido | Nivel 3: 4500 Hz, 150 ms ON / 150 ms OFF, 5 repeticiones, pausa 600 ms |
+| `ALERTA` | Encendido | Apagado | Apagado | Apagado |
+| `SOSPECHA` | Apagado | Parpadeo lento | Apagado | Aviso breve a 2500 Hz |
+| `SOMNOLENCIA` | Apagado | Apagado | Parpadeo medio | Patrón recurrente a 3500 Hz |
+| `CRITICO` | Apagado | Apagado | Parpadeo rápido | Patrón prioritario a 4500 Hz |
+| `RECUPERACION` | Apagado | Alterno | Alterno | Apagado |
+| `ROSTRO_NO_VISIBLE` | Apagado | Patrón de supervisión | Apagado | Aviso a 3000 Hz |
+| `CAMARA_OBSTRUIDA_O_FALLO` | Apagado | Alterno | Alterno | Aviso a 3000 Hz |
 | `MANTENIMIENTO` | Apagado | Encendido | Apagado | Apagado |
 | `PARO_EMERGENCIA` | Apagado | Apagado | Encendido | Apagado |
 | `ERROR` | Apagado | Apagado | Doble parpadeo | Apagado |
@@ -847,15 +878,20 @@ Para habilitar registro de eventos, cambiar en `config.json`:
 "logging": {
   "enabled": true,
   "events_only": true,
-  "path": "logs/events.csv"
+  "path": "logs/events.csv",
+  "snapshot_interval_seconds": 5.0,
+  "flush_interval_seconds": 2.0
 }
 ```
 
-El logger guarda transiciones de estado con timestamp, modo, motivo, metricas principales, FPS, buzzer, frecuencia del buzzer y LEDs activos.
+El logger guarda tiempo civil y monotónico, estados anterior/nuevo, motivo,
+eventos, EAR por ojo, cierre normalizado, cierre actual, basal de parpadeo,
+PERCLOS y cobertura, bostezos, pose, visión, FPS y alerta física. Agrupa
+escrituras por intervalo; transiciones críticas y fallos se vacían de inmediato.
 
-## Optimizacion V3 para Jetson Nano 4 GB
+## Optimizacion V4 para Jetson Nano 4 GB
 
-Esta version mantiene la calibracion O/S/D, la maquina de estados, el predictor
+Esta version mantiene la calibracion en tres etapas, el predictor
 dlib de 68 landmarks y la asignacion fisica de pines de la version base. Los
 cambios son exclusivamente de software y se concentran en evitar trabajo que
 no aporta una observacion nueva.
@@ -927,7 +963,7 @@ no aporta una observacion nueva.
 Benchmark en la Jetson Nano de desarrollo con la camara CSI activa,
 procesamiento 640x360 y escena sin rostro:
 
-| Metrica V3 | Resultado |
+| Metrica V4 | Resultado |
 | --- | ---: |
 | FPS del analizador | 29.189, limitado por camara a ~30 FPS |
 | Latencia media | 10.526 ms |
@@ -962,11 +998,12 @@ python3 -m json.tool config.json >/dev/null
 tegrastats
 ```
 
-Estado actual: **31 pruebas unitarias aprobadas**. Entre los casos cubiertos
-están perfiles O/S/D válidos e inválidos, diferencias anatómicas de apertura,
-microsueño sin reinicio por aperturas espurias, vibración/desenfoque simulado,
-pérdida breve de rostro, histéresis, PERCLOS, GPIO/PWM y rendimiento. Estas
-pruebas no sustituyen la validación física con cámara y vehículo.
+La suite cubre perfiles estáticos válidos e inválidos, valores próximos y
+extremos, migración heredada, parpadeos, apertura reducida, cierres críticos,
+bostezos, cabeceos, PERCLOS y cobertura, visión degradada, pérdida de rostro,
+cámara sin cuadros, un solo ojo, FPS variable, recuperación, recaída,
+histéresis, alertas, GPIO/PWM y rendimiento. Estas pruebas no sustituyen la
+validación física con cámara y montaje final.
 
 Opcionalmente, para una sesion de rendimiento maximo:
 
@@ -982,23 +1019,35 @@ saltados. En operacion final se debe vigilar throttling termico.
 Se intento construir un engine FP16 nativo con `trtexec` de TensorRT 8.2.1 y el
 SSD Caffe oficial. El parser rechazo `clip` en `DetectionOutput` y, despues del
 ajuste diagnostico, fallo en `Concat`, `Softmax` y `Reshape`. No se distribuye
-un engine que no pueda reproducirse ni validarse. V3 selecciona dlib CNN CUDA
+un engine que no pueda reproducirse ni validarse. V4 selecciona dlib CNN CUDA
 porque fue el backend mas rapido medido; OpenCV DNN CUDA FP16 queda en segundo
 lugar. TensorRT requiere un modelo ONNX compatible y validacion independiente.
 
 ### Limitaciones
 
+- Una cámara no puede confirmar clínicamente un microsueño. `CRITICO` significa
+  cierre ocular crítico o evento visual compatible con una posible pérdida
+  momentánea de vigilancia, no un diagnóstico.
+- Las pruebas de fatiga deben hacerse en simulador, vehículo estacionado o
+  entorno controlado; nunca se debe provocar somnolencia durante conducción.
 - La CNN facial se ejecuta en GPU; el predictor de 68 landmarks sigue en CPU.
 - El primer arranque CUDA tarda varios segundos mientras crea el contexto y
   calienta el backend; no representa la latencia estable por frame.
-- La calibracion es de sesion y debe repetirse al reiniciar.
-- La calibración debe realizarse con el vehículo detenido; movimiento, vibración
-  o cambios de luz durante O/S/D pueden invalidar los perfiles.
+- El perfil se persiste, pero debe repetirse si cambia conductor, lentes,
+  asiento, cámara, iluminación relevante o montaje.
+- La calibración debe realizarse con el vehículo detenido; movimiento,
+  vibración o cambios de luz pueden invalidar una etapa.
 - La deteccion facial a media escala exige que el rostro tenga un tamano
   suficiente; la UI permite comprobar calidad y rectangulo en tiempo real.
 - El predictor dlib de 68 landmarks puede degradarse con oclusión, reflejos,
-  desenfoque intenso o pose extrema. V3 retiene o rechaza esos cuadros, pero no
+  desenfoque intenso o pose extrema. V4 retiene o rechaza esos cuadros, pero no
   puede reconstruir una apertura ocular que la cámara no observa.
+- MAR y landmarks no distinguen siempre un bostezo de hablar, cantar, comer,
+  beber o gritar; por eso se exige un ciclo sostenido y la boca por sí sola no
+  eleva el estado.
+- Sin un sensor físico adicional, una pérdida visual persistente no permite
+  distinguir con certeza cámara obstruida, escena vacía o conductor fuera de
+  encuadre; se emite una alerta de supervisión común.
 - Las pruebas unitarias y benchmarks no constituyen certificación automotriz.
   Antes de uso real se requieren ensayos controlados de día/noche, con lentes,
   distintos conductores, montaje final y perfiles de vibración del vehículo.
@@ -1025,14 +1074,13 @@ Si se mueve el archivo, actualizar `dlib.predictor_path` en `config.json`.
 
 ### Muchas falsas alertas
 
-- Completar las calibraciones `O`, `S` y `D` hasta que el panel muestre
-  `O:OK S:OK D:OK`.
+- Ejecutar `C` y completar las tres etapas y la observación dinámica.
 - Comparar EAR crudo/filtrado y revisar `Señal ocular`, nitidez y diferencia
   entre ojos. `NO_CONFIABLE` frecuente apunta a imagen o pose, no a somnolencia.
 - Mejorar iluminación, fijación de cámara y tamaño del rostro en el frame;
   revisar reflejos en lentes y giro lateral.
-- Repetir O/S/D con el vehículo detenido si cambió conductor, cámara, asiento
-  o lentes.
+- Repetir la calibración completa con el vehículo detenido si cambió
+  conductor, cámara, asiento o lentes.
 - Ajustar `stability` solo con evidencia registrada. No modificar
   `ear_threshold` como primera medida: es el respaldo previo a la calibración.
 

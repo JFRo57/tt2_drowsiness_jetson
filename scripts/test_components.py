@@ -22,16 +22,11 @@ class ComponentTester(object):
         ("amarillo", (False, True, False), "yellow_board_pin"),
         ("rojo", (False, False, True), "red_board_pin"),
     )
-    TONE_CASES = (
-        ("nivel 1", AlertController.LEVEL_1_FREQ),
-        ("nivel 2", AlertController.LEVEL_2_FREQ),
-        ("nivel 3", AlertController.LEVEL_3_FREQ),
-    )
     PATTERN_CASES = (
-        ("NORMAL", 2.0),
-        ("POSIBLE_SOMNOLENCIA", 3.2),
-        ("ALERTA", 4.8),
-        ("ALERTA_CRITICA", 4.2),
+        ("ALERTA", 2.0),
+        ("SOSPECHA", 3.2),
+        ("SOMNOLENCIA", 4.8),
+        ("CRITICO", 4.2),
     )
 
     def __init__(
@@ -45,6 +40,7 @@ class ComponentTester(object):
         output=print,
         sleep=time.sleep,
         monotonic=time.monotonic,
+        config=None,
     ):
         self.gpio = gpio
         self.led_seconds = max(0.0, float(led_seconds))
@@ -57,6 +53,13 @@ class ComponentTester(object):
         self.output = output
         self.sleep = sleep
         self.monotonic = monotonic
+        self.config = config or {"alerts": {}}
+        alert_cfg = self.config.get("alerts", {})
+        self.tone_cases = (
+            ("sospecha", int(alert_cfg.get("suspicion_frequency", 2500))),
+            ("somnolencia", int(alert_cfg.get("somnolence_frequency", 3500))),
+            ("critico", int(alert_cfg.get("critical_frequency", 4500))),
+        )
 
     def _pause(self):
         if self.pause_seconds:
@@ -103,7 +106,7 @@ class ComponentTester(object):
             "Backend: %s; BOARD %s"
             % (self.gpio.buzzer_backend(), self.gpio.buzzer_cfg["board_pin"])
         )
-        for label, frequency in self.TONE_CASES:
+        for label, frequency in self.tone_cases:
             self.output(
                 "Buzzer %s: %d Hz durante %.1f s"
                 % (label, frequency, self.tone_seconds)
@@ -117,7 +120,7 @@ class ComponentTester(object):
             self._pause()
 
     def _drive_pattern(self, state, duration):
-        alerts = AlertController(self.gpio)
+        alerts = AlertController(self.gpio, self.config)
         started = self.monotonic()
         while True:
             elapsed = self.monotonic() - started
@@ -247,6 +250,7 @@ def main(argv=None):
         led_seconds=args.led_seconds,
         tone_seconds=args.tone_seconds,
         pattern_seconds=args.pattern_seconds,
+        config=config,
     )
     try:
         tester.run(args.section)

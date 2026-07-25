@@ -30,7 +30,7 @@ class FakeAlerts(object):
     def __init__(self):
         self.calls = []
 
-    def update(self, state, mode):
+    def update(self, state, mode, vision_state=None):
         self.calls.append((state, mode))
 
 

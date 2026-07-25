@@ -1,448 +1,466 @@
 import time
-from collections import deque
+
+from .temporal_events import EyeNormalizer, TemporalEventEngine
+from .vision_reliability import VisionReliabilityMonitor
+
 
 class FatigueDetector(object):
+    """Coordina señales, eventos y la máquina temporal de somnolencia."""
+
     STATES = (
-        "INICIALIZANDO", "CALIBRANDO", "NORMAL", "PARPADEO", "POSIBLE_SOMNOLENCIA",
-        "ALERTA", "ALERTA_CRITICA", "ROSTRO_NO_DETECTADO", "MANTENIMIENTO",
-        "PARO_EMERGENCIA", "ERROR"
+        "CALIBRACION", "ALERTA", "SOSPECHA", "SOMNOLENCIA", "CRITICO",
+        "RECUPERACION", "MANTENIMIENTO", "PARO_EMERGENCIA", "ERROR",
     )
-    RECOVERY_STATES = ("POSIBLE_SOMNOLENCIA", "ALERTA", "ALERTA_CRITICA")
+    OPERATIONAL_STATES = (
+        "ALERTA", "SOSPECHA", "SOMNOLENCIA", "CRITICO", "RECUPERACION",
+    )
+    LEGACY_STATE_ALIASES = {
+        "NORMAL": "ALERTA",
+        "PARPADEO": "ALERTA",
+        "POSIBLE_SOMNOLENCIA": "SOSPECHA",
+        "ALERTA_CRITICA": "CRITICO",
+    }
+    RECOVERY_STATES = ("SOSPECHA", "SOMNOLENCIA", "CRITICO", "RECUPERACION")
 
     def __init__(self, config, clock=None):
-        self.config = config["fatigue"]
-        self.calibration_config = config.get("calibration", {})
+        self.full_config = config
+        self.config = config.get("fatigue", {})
         self.stability_config = config.get("stability", {})
         self.clock = clock or time.monotonic
-        self.state = "INICIALIZANDO"
+        self.normalizer = EyeNormalizer(config)
+        self.vision = VisionReliabilityMonitor(config, clock=self.clock)
+        self.events = TemporalEventEngine(config, clock=self.clock)
+
+        self.state = "CALIBRACION"
         self.previous_state = None
-        self.reason = "Inicializando sistema"
-        self.ear_threshold = float(self.config["ear_threshold"])
-        self.drowsy_ear_threshold = float(self.config.get("drowsy_ear_threshold", self.ear_threshold + 0.04))
-        self.ear_hysteresis = max(
-            0.002, float(self.stability_config.get("ear_hysteresis", 0.012))
+        self.reason = "Se requiere un perfil de calibracion valido"
+        self.last_transition_reason = self.reason
+        self.last_transition = self.clock()
+        self.state_entered_at = self.last_transition
+        self.stable_since = None
+        self.strong_since = None
+        self.recovery_open_since = None
+        self.last_critical_at = None
+        self.operational_state_before_mode = "ALERTA"
+        self.profile = None
+
+        # Propiedades heredadas conservadas para UI y configuraciones V3 previas.
+        self.ear_threshold = float(self.config.get("ear_threshold", 0.22))
+        self.drowsy_ear_threshold = float(
+            self.config.get("drowsy_ear_threshold", self.ear_threshold + 0.04)
+        )
+        self.ear_hysteresis = float(
+            self.stability_config.get("ear_hysteresis", 0.012)
         )
         self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
-        ear_window = max(1, int(self.stability_config.get("ear_median_window", 3)))
-        if ear_window % 2 == 0:
-            ear_window += 1
-        self.ear_samples = deque(maxlen=ear_window)
-        self.eye_quality_threshold = float(
-            self.stability_config.get("eye_quality_threshold", 0.25)
-        )
-        self.close_confirm_seconds = max(
-            0.0, float(self.stability_config.get("close_confirm_seconds", 0.08))
-        )
-        self.open_confirm_seconds = max(
-            0.0, float(self.stability_config.get("open_confirm_seconds", 0.15))
-        )
-        self.unreliable_hold_seconds = max(
-            0.0, float(self.stability_config.get("unreliable_hold_seconds", 0.25))
-        )
-        self.face_loss_hold_seconds = max(
-            0.0, float(self.stability_config.get("face_loss_hold_seconds", 0.25))
-        )
-        self.profile_min_confidence = float(self.calibration_config.get("profile_min_confidence", 0.35))
-        self.profile_warning_seconds = float(self.calibration_config.get("profile_warning_seconds", 0.8))
-        self.calibrated_profile = "NO_CALIBRADO"
-        self.calibrated_profile_confidence = 0.0
-        self.calibrated_profile_since = None
-        self.calibrated_profile_seconds = 0.0
-        self.closed_since = None
-        self.yawn_since = None
-        self.nod_since = None
-        self.gaze_away_since = None
-        self.no_face_since = None
-        self.recovery_since = None
-        self.last_transition = self.clock()
-        self.perclos = deque()
-        self._perclos_total_seconds = 0.0
-        self._perclos_closed_seconds = 0.0
-        self._perclos_last_time = None
-        self._perclos_last_closed = False
-        self.blinks = deque(maxlen=120)
-        self.yawns = deque(maxlen=20)
-        self.closed_duration = 0.0
-        self.last_blink_duration = 0.0
-        self.possible_yawn = False
-        self.possible_nod = False
-        self.gaze_away_seconds = 0.0
         self.head_pitch_baseline = None
-        self._reset_eye_signal(clear_history=True)
-
-    def reset(self):
-        threshold = self.ear_threshold
-        drowsy_threshold = self.drowsy_ear_threshold
-        open_threshold = self.ear_open_threshold
-        pitch_baseline = self.head_pitch_baseline
-        self.state = "NORMAL"
-        self.previous_state = None
-        self.reason = "Metricas temporales reiniciadas"
-        self.closed_since = None
-        self.yawn_since = None
-        self.nod_since = None
-        self.gaze_away_since = None
-        self.no_face_since = None
-        self.recovery_since = None
-        self.last_transition = self.clock()
-        self.perclos.clear()
-        self._perclos_total_seconds = 0.0
-        self._perclos_closed_seconds = 0.0
-        self._perclos_last_time = None
-        self._perclos_last_closed = False
-        self.blinks.clear()
-        self.yawns.clear()
         self.closed_duration = 0.0
         self.last_blink_duration = 0.0
         self.possible_yawn = False
         self.possible_nod = False
         self.gaze_away_seconds = 0.0
-        self.ear_threshold = threshold
-        self.drowsy_ear_threshold = drowsy_threshold
-        self.ear_open_threshold = open_threshold
-        self.head_pitch_baseline = pitch_baseline
-        self._reset_eye_signal(clear_history=True)
         self.calibrated_profile = "NO_CALIBRADO"
         self.calibrated_profile_confidence = 0.0
-        self.calibrated_profile_since = None
         self.calibrated_profile_seconds = 0.0
+        self._profile_since = None
+
+    @classmethod
+    def canonical_state(cls, state):
+        return cls.LEGACY_STATE_ALIASES.get(state, state)
+
+    def reset(self, clear_history=True):
+        now = self.clock()
+        self.events.reset(clear_history=clear_history)
+        self.vision.reset()
+        self.state = "ALERTA" if self.profile else "CALIBRACION"
+        self.previous_state = None
+        self.reason = ("Metricas temporales reiniciadas" if self.profile
+                       else "Se requiere un perfil de calibracion valido")
+        self.last_transition_reason = self.reason
+        self.last_transition = now
+        self.state_entered_at = now
+        self.stable_since = None
+        self.strong_since = None
+        self.recovery_open_since = None
+        self.closed_duration = 0.0
+        self.last_blink_duration = 0.0
+        self.possible_yawn = False
+        self.possible_nod = False
+        self.calibrated_profile = "NO_CALIBRADO"
+        self.calibrated_profile_confidence = 0.0
+        self.calibrated_profile_seconds = 0.0
+        self._profile_since = None
 
     def apply_calibrated_threshold(self, value):
         self.ear_threshold = float(value)
         self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
 
     def apply_calibration(self, result):
-        thresholds = result.get("thresholds", {}) if result else {}
+        if not result:
+            return False
+        thresholds = result.get("thresholds", {})
+        profile = result.get("profile_data")
+        if profile is None and result.get("format_version"):
+            profile = result
+            thresholds = profile.get("thresholds", thresholds)
         if thresholds.get("ear_threshold") is not None:
             self.ear_threshold = float(thresholds["ear_threshold"])
-        elif result and result.get("ear_threshold") is not None:
+        elif result.get("ear_threshold") is not None:
             self.ear_threshold = float(result["ear_threshold"])
         if thresholds.get("drowsy_ear_threshold") is not None:
             self.drowsy_ear_threshold = float(thresholds["drowsy_ear_threshold"])
+        elif thresholds.get("reduced_ear_threshold") is not None:
+            self.drowsy_ear_threshold = float(thresholds["reduced_ear_threshold"])
         if thresholds.get("ear_open_threshold") is not None:
             self.ear_open_threshold = float(thresholds["ear_open_threshold"])
         else:
             self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
         if thresholds.get("open_pitch_reference") is not None:
             self.head_pitch_baseline = float(thresholds["open_pitch_reference"])
-        self._reset_eye_signal(clear_history=True)
+        if profile is None:
+            return False
+        self.profile = profile
+        self.normalizer.apply_profile(profile)
+        self.events.apply_profile(profile)
+        neutral = profile.get("neutral_head_pose", {})
+        if neutral.get("pitch") is not None:
+            self.head_pitch_baseline = float(neutral["pitch"])
+        self.reset(clear_history=True)
+        return True
 
-    def update(self, metrics, mode="AUTOMATIC"):
+    def update(self, metrics, mode="AUTOMATIC", monitoring_enabled=True,
+               paused=False, analysis_fps=0.0, camera_error=None):
         now = self.clock()
         self.previous_state = self.state
+        vision = self.vision.update(metrics, analysis_fps, camera_error)
+        metrics.update({
+            "vision_state": vision["state"],
+            "vision_reason": vision["reason"],
+            "vision_valid_eye_count": vision["valid_eye_count"],
+            "vision_measurement_partial": vision["measurement_partial"],
+            "no_face_seconds": vision["face_missing_seconds"],
+        })
+
         if mode == "EMERGENCY":
-            self._pause_perclos(now)
+            self.events.update(metrics, monitoring=False, paused=True)
+            self.operational_state_before_mode = (
+                self.state if self.state in self.OPERATIONAL_STATES else "ALERTA"
+            )
             return self._set("PARO_EMERGENCIA", "Paro de emergencia activo", now)
         if mode == "MAINTENANCE":
-            self._pause_perclos(now)
-            return self._set("MANTENIMIENTO", "Modo mantenimiento: alerta auditiva suspendida", now)
-        if not metrics.get("face_detected", False):
-            self._pause_perclos(now)
-            if self.no_face_since is None:
-                self.no_face_since = now
-            no_face_time = now - self.no_face_since
-            metrics["no_face_seconds"] = no_face_time
-            if no_face_time <= self.face_loss_hold_seconds:
-                return self._set(
-                    self.state,
-                    "Rostro inestable: conservando estado %.2f s" % no_face_time,
+            self.events.update(metrics, monitoring=False, paused=True)
+            self.operational_state_before_mode = (
+                self.state if self.state in self.OPERATIONAL_STATES else "ALERTA"
+            )
+            return self._set(
+                "MANTENIMIENTO",
+                "Modo mantenimiento: medicion temporal en pausa",
+                now,
+            )
+        if self.state in ("MANTENIMIENTO", "PARO_EMERGENCIA"):
+            self.state = self.operational_state_before_mode
+            self.state_entered_at = now
+
+        if not monitoring_enabled or self.profile is None:
+            event_metrics = self.events.update(metrics, monitoring=False, paused=True)
+            metrics.update(event_metrics)
+            self._update_compatibility_metrics(metrics)
+            return self._set(
+                "CALIBRACION",
+                "Calibracion estatica y basal de parpadeos incompletas",
+                now,
+            )
+        if paused:
+            event_metrics = self.events.update(metrics, monitoring=True, paused=True)
+            metrics.update(event_metrics)
+            self._update_compatibility_metrics(metrics)
+            return self._set(self.state, "Monitoreo pausado; metricas excluidas", now)
+
+        signals = self.normalizer.normalize(metrics)
+        signals.update(self.normalizer.pose_deltas(metrics))
+        signals.update({
+            "face_detected": metrics.get("face_detected", False),
+            "pose_reliable": metrics.get("pose_reliable", True),
+            "vision_state": vision["state"],
+            "frame_sequence": metrics.get("frame_sequence"),
+            "ear": metrics.get("ear"),
+            "mar": metrics.get("mar"),
+        })
+        metrics.update(signals)
+        event_metrics = self.events.update(signals, monitoring=True, paused=False)
+        metrics.update(event_metrics)
+        self._update_calibrated_profile(now, metrics)
+        self._update_compatibility_metrics(metrics)
+        return self._decide(now, metrics)
+
+    def update_no_frame(self, analysis_fps=0.0, camera_error=None,
+                        monitoring_enabled=True):
+        metrics = {"frame_available": False, "face_detected": False,
+                   "quality": 0.0}
+        return self.update(metrics, monitoring_enabled=monitoring_enabled,
+                           analysis_fps=analysis_fps, camera_error=camera_error)
+
+    def _decide(self, now, metrics):
+        vision_state = metrics.get("vision_state")
+        valid_eyes = int(metrics.get("valid_eye_count", 0))
+        critical = list(metrics.get("critical_evidence", []))
+        strong = list(metrics.get("strong_evidence", []))
+        weak = list(metrics.get("weak_evidence", []))
+        weak_modalities = set(metrics.get("weak_evidence_modalities", []))
+
+        if valid_eyes < 2 and not bool(
+            self.config.get("single_eye_critical_enabled", False)
+        ):
+            critical = []
+        relapse_seconds = float(
+            self.config.get("recovery_relapse_closed_seconds", 0.8)
+        )
+        if (self.state == "RECUPERACION"
+                and metrics.get("deep_closure_active")
+                and metrics.get("current_closure_seconds", 0.0) >= relapse_seconds):
+            critical.append("recaida_durante_recuperacion")
+
+        if critical:
+            self.last_critical_at = now
+            self.stable_since = None
+            self.strong_since = None
+            self.recovery_open_since = None
+            return self._transition(
+                "CRITICO",
+                "Posible perdida momentanea de vigilancia: %s" %
+                self._label(critical[0]),
+                now,
+            )
+
+        eye_decision_available = bool(metrics.get("eye_measurement_valid", False))
+        vision_allows_decision = vision_state in ("VISION_VALIDA", "VISION_DEGRADADA")
+        if not eye_decision_available or not vision_allows_decision:
+            self.stable_since = None
+            self.strong_since = None
+            return self._set(
+                self.state,
+                "Estado conservado por %s: %s" % (
+                    vision_state, metrics.get("vision_reason", "medicion no valida")
+                ),
+                now,
+            )
+
+        head_normal = not any(name in metrics.get("active_events", []) for name in (
+            "CABEZA_ABAJO", "INCLINACION_CABEZA_SOSTENIDA", "GIRO_LATERAL_CABEZA"
+        ))
+        eyes_open = (
+            metrics.get("closure_normalized") is not None
+            and float(metrics["closure_normalized"])
+            <= float(self.config.get("recovery_open_closure_level", 0.25))
+        )
+        stable = not strong and not weak and eyes_open and head_normal
+
+        if self.state == "CRITICO":
+            minimum_hold = float(self.config.get("critical_minimum_hold_seconds", 2.0))
+            open_required = float(self.config.get("critical_open_recovery_seconds", 2.0))
+            if vision_state == "VISION_VALIDA" and eyes_open and head_normal:
+                if self.recovery_open_since is None:
+                    self.recovery_open_since = now
+            else:
+                self.recovery_open_since = None
+            open_elapsed = (now - self.recovery_open_since
+                            if self.recovery_open_since is not None else 0.0)
+            if now - self.state_entered_at >= minimum_hold and open_elapsed >= open_required:
+                self.stable_since = now
+                return self._transition(
+                    "RECUPERACION",
+                    "Ojos abiertos y cabeza neutral; inicia observacion posterior",
                     now,
                 )
-            self._reset_eye_signal(clear_history=True)
-            self.calibrated_profile = "DESCONOCIDO"
-            self.calibrated_profile_confidence = 0.0
-            self.calibrated_profile_since = None
-            self.calibrated_profile_seconds = 0.0
-            if no_face_time >= float(self.config["no_face_warning_seconds"]):
-                return self._set("ROSTRO_NO_DETECTADO", "Rostro no detectado por %.1f s" % no_face_time, now)
-            return self._set("NORMAL", "Perdida momentanea de rostro", now)
-        self.no_face_since = None
-        metrics["no_face_seconds"] = 0.0
-        ear = metrics.get("ear_raw", metrics.get("ear"))
-        quality = float(metrics.get("quality", 0.0))
-        sample_reliable = bool(
-            ear is not None
-            and quality >= self.eye_quality_threshold
-            and metrics.get("eye_reliable", True)
-        )
-        filtered_ear = self._filter_ear(ear, sample_reliable)
-        closed_state, reliable = self._update_eye_state(
-            now, filtered_ear, sample_reliable
-        )
-        closed = bool(closed_state) if closed_state is not None else False
-        if closed_state is None:
-            self._pause_perclos(now)
-        else:
-            self._update_perclos(now, closed)
-        self._update_eye_timing(now, closed_state, reliable)
-        self._update_calibrated_profile(now, metrics)
-        self._update_yawn(now, metrics)
-        self._update_head(now, metrics)
-        self._update_gaze(now, metrics)
-        metrics.update({
-            "ear_threshold": self.ear_threshold,
-            "ear_open_threshold": self.ear_open_threshold,
-            "ear_filtered": filtered_ear,
-            "eye_closed_stable": closed_state,
-            "eye_decision_reliable": reliable,
-            "eye_signal_status": self.eye_signal_status,
-            "closed_seconds": self.closed_duration,
-            "perclos": self.current_perclos(now),
-            "blink_count_recent": len(self.blinks),
-            "last_blink_seconds": self.last_blink_duration,
-            "possible_yawn": self.possible_yawn,
-            "recent_yawns": len(self.yawns),
-            "possible_nod": self.possible_nod,
-            "gaze_away_seconds": self.gaze_away_seconds,
-            "calibrated_profile": self.calibrated_profile,
-            "calibrated_profile_confidence": self.calibrated_profile_confidence,
-            "calibrated_profile_seconds": self.calibrated_profile_seconds,
-            "drowsy_ear_threshold": self.drowsy_ear_threshold,
-        })
-        return self._decide(now, metrics, closed, reliable)
+            return self._set(
+                "CRITICO",
+                "Estado critico retenido; requiere vision valida y apertura estable",
+                now,
+            )
 
-    def _filter_ear(self, ear, reliable):
-        if reliable:
-            self.ear_samples.append(float(ear))
-        if not self.ear_samples:
-            return None
-        ordered = sorted(self.ear_samples)
-        return float(ordered[len(ordered) // 2])
+        if self.state == "RECUPERACION":
+            if strong:
+                self.stable_since = None
+                return self._transition(
+                    "SOMNOLENCIA",
+                    "Patron fuerte durante recuperacion: %s" % self._label(strong[0]),
+                    now,
+                )
+            if stable:
+                if self.stable_since is None:
+                    self.stable_since = now
+                if now - self.stable_since >= float(
+                    self.config.get("recovery_observation_seconds", 8.0)
+                ):
+                    return self._transition(
+                        "SOSPECHA",
+                        "Recuperacion estable; descenso controlado a sospecha",
+                        now,
+                    )
+            else:
+                self.stable_since = None
+            return self._set(
+                "RECUPERACION",
+                "Observando estabilidad posterior al evento critico",
+                now,
+            )
 
-    def _update_eye_state(self, now, ear, sample_reliable):
-        self.eye_state_changed = False
-        if not sample_reliable or ear is None:
-            if (
-                self.last_reliable_eye_time is not None
-                and now - self.last_reliable_eye_time <= self.unreliable_hold_seconds
-            ):
-                self.eye_signal_status = "RETENIDO"
-                return self.eye_closed, True
-            self.eye_candidate_state = None
-            self.eye_candidate_since = None
-            self.eye_signal_status = "NO_CONFIABLE"
-            return None, False
+        if self.state == "SOMNOLENCIA":
+            if strong:
+                self.stable_since = None
+                return self._set(
+                    "SOMNOLENCIA", "Evidencia fuerte persistente: %s" %
+                    self._label(strong[0]), now,
+                )
+            if stable:
+                if self.stable_since is None:
+                    self.stable_since = now
+                if now - self.stable_since >= float(
+                    self.config.get("somnolence_clear_seconds", 10.0)
+                ):
+                    return self._transition(
+                        "SOSPECHA", "Patron fuerte ausente durante periodo estable", now,
+                    )
+            else:
+                self.stable_since = None
+            return self._set("SOMNOLENCIA", "Historial de somnolencia retenido", now)
 
-        self.last_reliable_eye_time = now
-        if self.eye_closed:
-            observed_closed = float(ear) < self.ear_open_threshold
-        else:
-            observed_closed = float(ear) <= self.ear_threshold
+        if self.state == "SOSPECHA":
+            if len(strong) >= 2:
+                return self._transition(
+                    "SOMNOLENCIA", "Varias evidencias fuertes: %s" %
+                    ", ".join(self._label(item) for item in strong[:2]), now,
+                )
+            if strong:
+                self.stable_since = None
+                if self.strong_since is None:
+                    self.strong_since = now
+                if now - self.strong_since >= float(
+                    self.config.get("suspicion_to_somnolence_seconds", 4.0)
+                ):
+                    return self._transition(
+                        "SOMNOLENCIA", "Evidencia fuerte persistente: %s" %
+                        self._label(strong[0]), now,
+                    )
+                return self._set(
+                    "SOSPECHA", "Confirmando evidencia fuerte: %s" %
+                    self._label(strong[0]), now,
+                )
+            self.strong_since = None
+            if len(weak_modalities) >= 2:
+                self.stable_since = None
+                return self._set(
+                    "SOSPECHA", "Evidencias debiles multimodales: %s" %
+                    ", ".join(self._label(item) for item in weak), now,
+                )
+            if stable:
+                if self.stable_since is None:
+                    self.stable_since = now
+                if now - self.stable_since >= float(
+                    self.config.get("suspicion_clear_seconds", 8.0)
+                ):
+                    return self._transition(
+                        "ALERTA", "Estabilidad sostenida sin evidencia anomala", now,
+                    )
+            else:
+                self.stable_since = None
+            return self._set("SOSPECHA", "Memoria preventiva e histeresis activas", now)
 
-        if observed_closed == self.eye_closed:
-            self.eye_candidate_state = None
-            self.eye_candidate_since = None
-            self.eye_signal_status = "CERRADO" if self.eye_closed else "ABIERTO"
-            return self.eye_closed, True
+        # ALERTA representa vigilancia normal. Un bostezo aislado no cambia el estado.
+        if len(strong) >= 2:
+            return self._transition(
+                "SOMNOLENCIA", "Combinacion de evidencias fuertes: %s" %
+                ", ".join(self._label(item) for item in strong[:2]), now,
+            )
+        if strong:
+            self.strong_since = now
+            return self._transition(
+                "SOSPECHA", "Evidencia fuerte inicial: %s" % self._label(strong[0]), now,
+            )
+        if len(weak_modalities) >= 2:
+            return self._transition(
+                "SOSPECHA", "Dos evidencias debiles de modalidades distintas", now,
+            )
+        self.stable_since = now if self.stable_since is None else self.stable_since
+        return self._set("ALERTA", "Indicadores dentro del comportamiento personal", now)
 
-        if self.eye_candidate_state != observed_closed or self.eye_candidate_since is None:
-            self.eye_candidate_state = observed_closed
-            self.eye_candidate_since = now
-
-        confirm_seconds = (
-            self.close_confirm_seconds if observed_closed else self.open_confirm_seconds
-        )
-        if now - self.eye_candidate_since >= confirm_seconds:
-            self.eye_closed = observed_closed
-            self.eye_state_since = self.eye_candidate_since
-            self.eye_state_changed = True
-            self.eye_state_transition_at = self.eye_candidate_since
-            self.eye_candidate_state = None
-            self.eye_candidate_since = None
-            self.eye_signal_status = "CERRADO" if self.eye_closed else "ABIERTO"
-        else:
-            self.eye_signal_status = "CONFIRMANDO_CIERRE" if observed_closed else "CONFIRMANDO_APERTURA"
-        return self.eye_closed, True
-
-    def _reset_eye_signal(self, clear_history=False):
-        if clear_history and hasattr(self, "ear_samples"):
-            self.ear_samples.clear()
-        self.eye_closed = False
-        self.eye_candidate_state = None
-        self.eye_candidate_since = None
-        self.eye_state_since = None
-        self.eye_state_changed = False
-        self.eye_state_transition_at = None
-        self.last_reliable_eye_time = None
-        self.eye_signal_status = "INICIAL"
-        self.closed_since = None
-        self.closed_duration = 0.0
-
-    def _update_perclos(self, now, closed):
-        if self._perclos_last_time is not None:
-            start = self._perclos_last_time
-            duration = max(0.0, now - start)
-            if duration > 0.0:
-                segment = (start, now, self._perclos_last_closed)
-                self.perclos.append(segment)
-                self._perclos_total_seconds += duration
-                if self._perclos_last_closed:
-                    self._perclos_closed_seconds += duration
-        self._perclos_last_time = now
-        self._perclos_last_closed = bool(closed)
-        self._prune_perclos(now)
-
-    def current_perclos(self, now):
-        self._prune_perclos(now)
-        if self._perclos_total_seconds <= 0.0:
-            return 0.0
-        value = self._perclos_closed_seconds / self._perclos_total_seconds
-        return max(0.0, min(1.0, value))
-
-    def _pause_perclos(self, now):
-        self._perclos_last_time = None
-        self._perclos_last_closed = False
-        self._prune_perclos(now)
-
-    def _prune_perclos(self, now):
-        cutoff = now - float(self.config["perclos_window_seconds"])
-        while self.perclos and self.perclos[0][1] <= cutoff:
-            start, end, closed = self.perclos.popleft()
-            duration = max(0.0, end - start)
-            self._perclos_total_seconds -= duration
-            if closed:
-                self._perclos_closed_seconds -= duration
-        if self.perclos and self.perclos[0][0] < cutoff:
-            start, end, closed = self.perclos.popleft()
-            removed = max(0.0, cutoff - start)
-            self._perclos_total_seconds -= removed
-            if closed:
-                self._perclos_closed_seconds -= removed
-            self.perclos.appendleft((cutoff, end, closed))
-        self._perclos_total_seconds = max(0.0, self._perclos_total_seconds)
-        self._perclos_closed_seconds = max(
-            0.0,
-            min(self._perclos_closed_seconds, self._perclos_total_seconds),
-        )
-
-    def _update_eye_timing(self, now, closed, reliable):
-        if not reliable or closed is None:
-            return
-        if closed:
-            if self.closed_since is None:
-                self.closed_since = self.eye_state_since if self.eye_state_since is not None else now
-            self.closed_duration = now - self.closed_since
-        else:
-            if self.eye_state_changed and self.closed_since is not None:
-                ended_at = self.eye_state_transition_at if self.eye_state_transition_at is not None else now
-                dur = max(0.0, ended_at - self.closed_since)
-                if float(self.config["blink_min_seconds"]) <= dur <= float(self.config["blink_max_seconds"]):
-                    self.blinks.append(now)
-                    self.last_blink_duration = dur
-            self.closed_since = None
-            self.closed_duration = 0.0
-        while self.blinks and now - self.blinks[0] > 60.0:
-            self.blinks.popleft()
-
-    def _update_yawn(self, now, metrics):
-        mar = metrics.get("mar")
-        active = mar is not None and mar >= float(self.config["mar_threshold"])
-        if active:
-            if self.yawn_since is None:
-                self.yawn_since = now
-            self.possible_yawn = (now - self.yawn_since) >= float(self.config["yawn_min_seconds"])
-            if self.possible_yawn and (not self.yawns or now - self.yawns[-1] > 2.0):
-                self.yawns.append(now)
-        else:
-            self.yawn_since = None
-            self.possible_yawn = False
-        while self.yawns and now - self.yawns[0] > 180.0:
-            self.yawns.popleft()
+    @staticmethod
+    def _label(name):
+        return str(name).replace("_", " ")
 
     def _update_calibrated_profile(self, now, metrics):
-        profile = metrics.get("calibrated_profile", "NO_CALIBRADO")
-        confidence = float(metrics.get("calibrated_profile_confidence", 0.0))
-        if profile not in ("OPEN", "DROWSY", "ASLEEP") or confidence < self.profile_min_confidence:
-            self.calibrated_profile = profile if profile in ("NO_CALIBRADO", "DESCONOCIDO") else "DESCONOCIDO"
-            self.calibrated_profile_confidence = confidence
-            self.calibrated_profile_since = None
-            self.calibrated_profile_seconds = 0.0
-            return
-        if profile != self.calibrated_profile or self.calibrated_profile_since is None:
-            self.calibrated_profile_since = now
+        closure = metrics.get("closure_normalized")
+        if closure is None:
+            profile = "DESCONOCIDO"
+            confidence = 0.0
+        else:
+            partial = float(metrics.get("partial_closure_reference", 0.5))
+            refs = {"OPEN": 0.0, "REDUCED": partial, "CLOSED": 1.0}
+            distances = dict((key, abs(float(closure) - value))
+                             for key, value in refs.items())
+            profile = min(distances, key=distances.get)
+            confidence = max(0.0, 1.0 - distances[profile])
+        if profile != self.calibrated_profile:
+            self._profile_since = now
         self.calibrated_profile = profile
         self.calibrated_profile_confidence = confidence
-        self.calibrated_profile_seconds = max(0.0, now - self.calibrated_profile_since)
+        self.calibrated_profile_seconds = (
+            max(0.0, now - self._profile_since) if self._profile_since is not None else 0.0
+        )
+        metrics.update({
+            "calibrated_profile": profile,
+            "calibrated_profile_confidence": confidence,
+            "calibrated_profile_seconds": self.calibrated_profile_seconds,
+        })
 
-    def _update_head(self, now, metrics):
-        pitch = metrics.get("pitch")
-        pitch_delta = None
-        if pitch is not None:
-            reference = self.head_pitch_baseline if self.head_pitch_baseline is not None else 0.0
-            pitch_delta = float(pitch) - reference
-        metrics["pitch_delta"] = pitch_delta
-        active = pitch_delta is not None and abs(pitch_delta) >= float(self.config["head_nod_pitch_threshold"])
-        if active:
-            if self.nod_since is None:
-                self.nod_since = now
-            self.possible_nod = (now - self.nod_since) >= float(self.config["head_nod_min_seconds"])
-        else:
-            self.nod_since = None
-            self.possible_nod = False
+    def _update_compatibility_metrics(self, metrics):
+        self.closed_duration = float(metrics.get("current_closure_seconds", 0.0))
+        self.last_blink_duration = float(metrics.get("last_blink_seconds", 0.0))
+        self.possible_yawn = bool(
+            "BOCA_AMPLIAMENTE_ABIERTA" in metrics.get("active_events", [])
+        )
+        self.possible_nod = bool(
+            "CABEZA_ABAJO" in metrics.get("active_events", [])
+        )
+        metrics.update({
+            "closed_seconds": self.closed_duration,
+            "possible_yawn": self.possible_yawn,
+            "possible_nod": self.possible_nod,
+            "ear_threshold": self.ear_threshold,
+            "ear_open_threshold": self.ear_open_threshold,
+            "drowsy_ear_threshold": self.drowsy_ear_threshold,
+        })
 
-    def _update_gaze(self, now, metrics):
-        gaze = metrics.get("gaze", "DESCONOCIDA")
-        away = gaze in ("IZQUIERDA", "DERECHA", "ABAJO")
-        if away:
-            if self.gaze_away_since is None:
-                self.gaze_away_since = now
-            self.gaze_away_seconds = now - self.gaze_away_since
-        else:
-            self.gaze_away_since = None
-            self.gaze_away_seconds = 0.0
-
-    def _decide(self, now, m, closed, reliable):
-        perclos = m["perclos"]
-        cd = self.closed_duration
-        blink_display_seconds = min(float(self.config["blink_max_seconds"]), float(self.config["prealert_closed_seconds"]))
-        if reliable and closed and cd < blink_display_seconds:
-            return self._set("PARPADEO", "Parpadeo en curso", now)
-        if cd >= float(self.config["critical_closed_seconds"]):
-            return self._set_risk("ALERTA_CRITICA", "Cierre ocular critico: %.1f s" % cd, now)
-        if cd >= float(self.config["alert_closed_seconds"]):
-            return self._set_risk("ALERTA", "Cierre ocular prolongado: %.1f s" % cd, now)
-        if cd >= float(self.config["prealert_closed_seconds"]):
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "Cierre ocular sostenido: %.1f s" % cd, now)
-        if self.calibrated_profile == "ASLEEP":
-            if self.calibrated_profile_seconds >= float(self.config["critical_closed_seconds"]):
-                return self._set_risk("ALERTA_CRITICA", "Perfil dormido sostenido: %.1f s" % self.calibrated_profile_seconds, now)
-            if self.calibrated_profile_seconds >= float(self.config["alert_closed_seconds"]):
-                return self._set_risk("ALERTA", "Perfil dormido: %.1f s" % self.calibrated_profile_seconds, now)
-            if self.calibrated_profile_seconds >= float(self.config["prealert_closed_seconds"]):
-                return self._set_risk("POSIBLE_SOMNOLENCIA", "Transicion a perfil dormido", now)
-        if self.calibrated_profile == "DROWSY" and self.calibrated_profile_seconds >= self.profile_warning_seconds:
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "Perfil calibrado de somnolencia: %.1f s" % self.calibrated_profile_seconds, now)
-        if perclos >= float(self.config["perclos_alert_threshold"]):
-            return self._set_risk("ALERTA", "PERCLOS elevado: %.0f%%" % (perclos * 100.0), now)
-        if perclos >= float(self.config["perclos_warning_threshold"]):
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "PERCLOS preventivo: %.0f%%" % (perclos * 100.0), now)
-        if self.possible_yawn and (cd > 0.3 or len(self.yawns) >= 2):
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "Bostezo con evidencia secundaria", now)
-        if self.possible_nod and cd > 0.25:
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "Cabeceo con cierre ocular", now)
-        if self.gaze_away_seconds >= float(self.config["gaze_away_warning_seconds"]):
-            return self._set_risk("POSIBLE_SOMNOLENCIA", "Mirada fuera del frente por %.1f s" % self.gaze_away_seconds, now)
-        if self.state in self.RECOVERY_STATES:
-            if self.recovery_since is None:
-                self.recovery_since = now
-            recovery_elapsed = now - self.recovery_since
-            if recovery_elapsed < float(self.config["recovery_seconds"]):
-                return self._set(
-                    self.state,
-                    "Periodo de recuperacion: %.1f s" % recovery_elapsed,
-                    now,
-                )
-        return self._set("NORMAL", "Indicadores dentro de rango", now)
-
-    def _set_risk(self, state, reason, now):
-        self.recovery_since = None
-        return self._set(state, reason, now)
-
-    def _set(self, state, reason, now):
-        if state not in self.RECOVERY_STATES:
-            self.recovery_since = None
+    def _transition(self, state, reason, now):
+        state = self.canonical_state(state)
         if state != self.state:
             self.last_transition = now
+            self.state_entered_at = now
+            self.last_transition_reason = reason
+            self.stable_since = None
+            self.strong_since = None
+            self.recovery_open_since = None
         self.state = state
         self.reason = reason
         return state, reason
+
+    def _set(self, state, reason, now):
+        state = self.canonical_state(state)
+        if state != self.state:
+            return self._transition(state, reason, now)
+        self.state = state
+        self.reason = reason
+        return state, reason
+
+    def _set_risk(self, state, reason, now):
+        return self._transition(self.canonical_state(state), reason, now)
+
+    # Adaptadores de la API incremental V3 para herramientas de rendimiento.
+    def _update_perclos(self, now, closed):
+        self.events.perclos_window.update(now, True, True, bool(closed))
+
+    def current_perclos(self, now):
+        return self.events.perclos_window.snapshot(now, 0.0, 0.0)["perclos"]
+
+    def _pause_perclos(self, now):
+        self.events.perclos_window.pause(now)

@@ -1,5 +1,9 @@
+import json
+import os
+import tempfile
 import unittest
 
+from src.application import default_config
 from src.calibration import CalibrationManager
 from src.fatigue_detector import FatigueDetector
 from src.presentation_ui import PresentationUI
@@ -16,304 +20,257 @@ class FakeClock(object):
         self.value += float(seconds)
 
 
-def make_config():
-    return {
-        "calibration": {
-            "duration_seconds": 0.20,
-            "min_samples": 3,
-            "quality_threshold": 0.20,
-            "min_ear_gap": 0.015,
-            "max_ear_std": 0.035,
-            "max_ear_mad": 0.025,
-            "max_profile_overlap_ratio": 0.65,
-            "max_profile_distance": 4.0,
-            "profile_min_confidence": 0.15,
-            "profile_warning_seconds": 0.8,
-            "feature_scales": {
-                "ear": 0.04,
-                "mar": 0.15,
-                "pitch": 12.0,
-                "yaw": 15.0,
-                "roll": 15.0,
-            },
-        },
-        "fatigue": {
-            "ear_threshold": 0.22,
-            "blink_min_seconds": 0.08,
-            "blink_max_seconds": 0.70,
-            "prealert_closed_seconds": 0.45,
-            "alert_closed_seconds": 0.85,
-            "critical_closed_seconds": 1.60,
-            "recovery_seconds": 1.0,
-            "perclos_window_seconds": 60.0,
-            "perclos_warning_threshold": 0.25,
-            "perclos_alert_threshold": 0.35,
-            "mar_threshold": 0.65,
-            "yawn_min_seconds": 1.0,
-            "head_nod_pitch_threshold": 18.0,
-            "head_nod_min_seconds": 0.8,
-            "gaze_away_warning_seconds": 2.0,
-            "no_face_warning_seconds": 2.0,
-        },
-        "stability": {
-            "ear_median_window": 3,
-            "ear_hysteresis": 0.012,
-            "close_confirm_seconds": 0.08,
-            "open_confirm_seconds": 0.15,
-            "unreliable_hold_seconds": 0.25,
-            "face_loss_hold_seconds": 0.25,
-            "eye_quality_threshold": 0.25,
-        },
-        "interface": {
-            "show_landmarks": True,
-            "show_information_panel": True,
-        },
-    }
-
-
-def metrics(ear, pitch=0.0, mar=0.25, yaw=0.0, roll=0.0, gaze="CENTRO"):
+def measured(ear, left=None, right=None, quality=0.9, pitch=0.0,
+             yaw=0.0, roll=0.0, mar=0.25):
     return {
         "face_detected": True,
-        "quality": 0.9,
+        "quality": quality,
         "ear": ear,
-        "mar": mar,
+        "left_ear": ear if left is None else left,
+        "right_ear": ear if right is None else right,
+        "eye_reliable": True,
+        "left_eye_reliable": True,
+        "right_eye_reliable": True,
+        "pose_reliable": True,
         "pitch": pitch,
         "yaw": yaw,
         "roll": roll,
-        "gaze": gaze,
+        "mar": mar,
+        "brightness": 100.0,
     }
 
 
 class CalibrationManagerTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
         self.clock = FakeClock()
-        self.manager = CalibrationManager(make_config(), clock=self.clock)
+        self.config = default_config()
+        calibration = self.config["calibration"]
+        calibration.update({
+            "profile_path": os.path.join(self.temp.name, "profile.json"),
+            "duration_seconds": 0.20,
+            "min_samples": 3,
+            "min_valid_sample_ratio": 0.60,
+            "min_ear_gap": 0.015,
+            "min_open_closed_gap": 0.05,
+            "natural_blink_observation_seconds": 0.80,
+            "voluntary_blink_observation_seconds": 1.5,
+            "min_natural_blinks": 2,
+            "min_voluntary_blinks": 5,
+        })
+        self.manager = CalibrationManager(self.config, clock=self.clock)
 
-    def capture(self, profile, sample):
-        self.manager.start(profile)
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def capture_stage(self, name, sample):
+        self.manager.start(name)
         result = None
-        for _ in range(4):
-            result = self.manager.update(dict(sample))
-            self.clock.advance(0.08)
-        if result is None:
-            result = self.manager.update(dict(sample))
+        for _ in range(5):
+            result = self.manager.update(dict(sample)) or result
+            self.clock.advance(0.06)
         self.assertIsNotNone(result)
         return result
 
-    def test_three_profiles_build_thresholds_and_classify(self):
-        self.capture("OPEN", metrics(0.32, pitch=0.0))
-        self.capture("DROWSY", metrics(0.23, pitch=9.0, mar=0.32))
-        result = self.capture("ASLEEP", metrics(0.12, pitch=28.0, gaze="ABAJO"))
+    def capture_static(self, opened=0.32, reduced=0.22, closed=0.10):
+        self.capture_stage("OPEN", measured(opened, pitch=2.0))
+        self.capture_stage("DROWSY", measured(reduced, pitch=2.0))
+        return self.capture_stage("ASLEEP", measured(closed, pitch=2.0))
 
+    def dynamic_blink(self):
+        for ear, step in ((0.32, 0.05), (0.22, 0.05), (0.10, 0.10),
+                          (0.22, 0.05), (0.32, 0.10)):
+            result = self.manager.update(measured(ear))
+            self.clock.advance(step)
+            if result and result.get("model_ready"):
+                return result
+        return None
+
+    def complete_dynamic(self):
+        result = self.dynamic_blink()
+        result = self.dynamic_blink() or result
+        for _ in range(12):
+            result = self.manager.update(measured(0.32)) or result
+            self.clock.advance(0.08)
+            if result and result.get("model_ready"):
+                break
+        return result
+
+    def test_three_static_stages_are_per_eye_and_use_reduced_name(self):
+        result = self.capture_static()
+
+        self.assertTrue(result["static_ready"])
+        self.assertTrue(self.manager.static_ready)
+        self.assertTrue(self.manager.active)
+        self.assertEqual("DYNAMIC_NATURAL", self.manager.active_profile)
+        self.assertEqual("O:OK R:OK C:OK",
+                         self.manager.status_metrics()["calibration_profiles"])
+        self.assertAlmostEqual(0.27, self.manager.thresholds["reduced_ear_threshold"])
+        self.assertAlmostEqual(0.16, self.manager.thresholds["ear_threshold"])
+
+    def test_complete_profile_saves_blink_percentiles_atomically(self):
+        self.capture_static()
+        result = self.complete_dynamic()
+
+        self.assertIsNotNone(result)
         self.assertTrue(result["model_ready"])
-        self.assertTrue(self.manager.model_ready)
-        self.assertAlmostEqual(0.275, self.manager.thresholds["drowsy_ear_threshold"], places=3)
-        self.assertAlmostEqual(0.175, self.manager.thresholds["ear_threshold"], places=3)
+        self.assertTrue(result["profile_saved"])
+        self.assertTrue(self.manager.ready_for_monitoring())
+        selected = result["profile_data"]["blink_baseline"]["selected"]
+        self.assertEqual(2, selected["event_count"])
+        self.assertIsNotNone(selected["median_seconds"])
+        self.assertIsNotNone(selected["p75_seconds"])
+        self.assertIsNotNone(selected["p90_seconds"])
+        self.assertFalse(os.path.exists(self.manager.profile_path + ".tmp"))
 
-        self.assertEqual("OPEN", self.manager.classify(metrics(0.32, pitch=0.0))["profile"])
-        self.assertEqual("DROWSY", self.manager.classify(metrics(0.23, pitch=9.0, mar=0.32))["profile"])
-        self.assertEqual("ASLEEP", self.manager.classify(metrics(0.12, pitch=28.0, gaze="ABAJO"))["profile"])
-        self.assertEqual("O:OK S:OK D:OK", self.manager.status_metrics()["calibration_profiles"])
+    def test_normalized_closure_is_personal_and_clamped(self):
+        self.capture_static()
+        result = self.complete_dynamic()
+        profile = result["profile_data"]
+        self.assertAlmostEqual(
+            0.0, self.manager.normalized_closure(measured(profile["eyes"]["combined"]["open"]))
+        )
+        self.assertAlmostEqual(
+            1.0, self.manager.normalized_closure(measured(profile["eyes"]["combined"]["closed"]))
+        )
+        self.assertEqual(0.0, self.manager.normalized_closure(measured(0.60)))
+        self.assertEqual(1.0, self.manager.normalized_closure(measured(0.03)))
 
-    def test_profiles_with_overlapping_ear_are_rejected(self):
-        self.capture("OPEN", metrics(0.30))
-        self.capture("DROWSY", metrics(0.29))
-        result = self.capture("ASLEEP", metrics(0.28))
-
-        self.assertFalse(result["model_ready"])
-        self.assertFalse(self.manager.model_ready)
-        self.assertIn("no separables", self.manager.message)
-
-    def test_low_quality_samples_do_not_complete_profile(self):
+    def test_invalid_stage_reports_only_affected_stage(self):
         self.manager.start("OPEN")
-        bad = metrics(0.32)
-        bad["quality"] = 0.1
+        result = None
         for _ in range(5):
-            result = self.manager.update(bad)
+            result = self.manager.update(measured(0.32, quality=0.1)) or result
+            self.clock.advance(0.06)
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual("OPEN", result["failed_stage"])
+        self.assertIn("Repita solo esta etapa", result["reason"])
+        self.assertNotIn("OPEN", self.manager.profiles)
+
+    def test_values_too_close_are_rejected_before_dynamic_phase(self):
+        self.capture_stage("OPEN", measured(0.30))
+        self.capture_stage("REDUCED", measured(0.29))
+        result = self.capture_stage("CLOSED", measured(0.28))
+
+        self.assertFalse(result["accepted"])
+        self.assertFalse(self.manager.static_ready)
+        self.assertFalse(self.manager.active)
+        self.assertIn("ABIERTO > REDUCIDO > CERRADO", self.manager.message)
+        self.assertNotIn(result["failed_stage"], self.manager.profiles)
+        self.assertEqual(result["failed_stage"], self.manager.next_required_stage())
+
+    def test_excessive_head_motion_rejects_stage(self):
+        self.manager.start("OPEN")
+        result = None
+        for pitch in (0.0, 15.0, -15.0, 16.0, -16.0):
+            result = self.manager.update(measured(0.32, pitch=pitch)) or result
+            self.clock.advance(0.06)
+
+        self.assertFalse(result["accepted"])
+        self.assertIn("movimiento excesivo", result["reason"])
+
+    def test_failed_recalibration_does_not_overwrite_valid_profile(self):
+        self.capture_static()
+        self.complete_dynamic()
+        with open(self.manager.profile_path, "r") as handle:
+            previous = handle.read()
+
+        self.manager.start("REDUCED")
+        for _ in range(5):
+            self.manager.update(measured(0.22, quality=0.05))
+            self.clock.advance(0.06)
+        with open(self.manager.profile_path, "r") as handle:
+            current = handle.read()
+
+        self.assertEqual(previous, current)
+        self.assertFalse(self.manager.ready_for_monitoring())
+
+    def test_natural_shortage_requests_voluntary_blinks(self):
+        self.capture_static()
+        result = None
+        for _ in range(12):
+            result = self.manager.update(measured(0.32)) or result
             self.clock.advance(0.08)
 
-        self.assertIsNone(result)
-        self.assertNotIn("OPEN", self.manager.profiles)
-        self.assertIn("invalida", self.manager.message)
+        self.assertTrue(result["dynamic_fallback"])
+        self.assertEqual("DYNAMIC_VOLUNTARY", self.manager.active_profile)
+        self.assertIn("cinco y ocho", self.manager.message)
 
-    def test_person_with_low_open_ear_gets_personal_thresholds(self):
-        self.capture("OPEN", metrics(0.22, pitch=2.0))
-        self.capture("DROWSY", metrics(0.17, pitch=8.0))
-        result = self.capture("ASLEEP", metrics(0.11, pitch=25.0, gaze="ABAJO"))
+    def test_legacy_v1_profile_is_migrated_when_it_has_blink_baseline(self):
+        stats = lambda value: {"median": value, "robust_std": 0.01}
+        legacy = {
+            "format_version": 1,
+            "profiles": {
+                "OPEN": {"ear": stats(0.32)},
+                "DROWSY": {"ear": stats(0.22)},
+                "ASLEEP": {"ear": stats(0.10)},
+            },
+            "blink_baseline": {"selected": {
+                "source": "legacy", "event_count": 5,
+                "median_seconds": 0.18, "p90_seconds": 0.25,
+            }},
+        }
+        with open(self.manager.profile_path, "w") as handle:
+            json.dump(legacy, handle)
 
-        self.assertTrue(result["model_ready"])
-        self.assertAlmostEqual(0.195, result["thresholds"]["drowsy_ear_threshold"], places=3)
-        self.assertAlmostEqual(0.140, result["thresholds"]["ear_threshold"], places=3)
-        self.assertGreater(result["thresholds"]["ear_open_threshold"], 0.140)
+        migrated = CalibrationManager(self.config, clock=self.clock)
 
-    def test_unreliable_eye_geometry_is_not_used_for_calibration(self):
-        self.manager.start("OPEN")
-        bad = metrics(0.32)
-        bad["eye_reliable"] = False
+        self.assertTrue(migrated.ready_for_monitoring())
+        self.assertEqual(2, migrated.profile_data["format_version"])
+        self.assertEqual(1, migrated.profile_data["migrated_from_version"])
+
+        migrated.start("REDUCED")
+        result = None
         for _ in range(5):
-            result = self.manager.update(bad)
-            self.clock.advance(0.08)
-
-        self.assertIsNone(result)
-        self.assertNotIn("OPEN", self.manager.profiles)
-
-
-class FatigueDetectorCalibrationTests(unittest.TestCase):
-    def setUp(self):
-        self.clock = FakeClock()
-        self.detector = FatigueDetector(make_config(), clock=self.clock)
-        self.detector.reset()
-
-    def test_apply_calibration_updates_both_ear_thresholds(self):
-        self.detector.apply_calibration({
-            "thresholds": {
-                "drowsy_ear_threshold": 0.275,
-                "ear_threshold": 0.175,
-                "ear_open_threshold": 0.195,
-                "open_pitch_reference": 3.0,
-            }
-        })
-
-        self.assertAlmostEqual(0.275, self.detector.drowsy_ear_threshold)
-        self.assertAlmostEqual(0.175, self.detector.ear_threshold)
-        self.assertAlmostEqual(0.195, self.detector.ear_open_threshold)
-        self.assertAlmostEqual(3.0, self.detector.head_pitch_baseline)
-
-    def test_drowsy_and_asleep_profiles_require_sustained_time(self):
-        drowsy = {"calibrated_profile": "DROWSY", "calibrated_profile_confidence": 0.9}
-        self.detector._update_calibrated_profile(10.0, drowsy)
-        self.detector._update_calibrated_profile(10.9, drowsy)
-        state, _ = self.detector._decide(10.9, {"perclos": 0.0}, False, True)
-        self.assertEqual("POSIBLE_SOMNOLENCIA", state)
-
-        self.detector.reset()
-        asleep = {"calibrated_profile": "ASLEEP", "calibrated_profile_confidence": 0.9}
-        self.detector._update_calibrated_profile(20.0, asleep)
-        self.detector._update_calibrated_profile(20.9, asleep)
-        state, _ = self.detector._decide(20.9, {"perclos": 0.0}, False, True)
-        self.assertEqual("ALERTA", state)
-
-        self.detector._update_calibrated_profile(21.7, asleep)
-        state, _ = self.detector._decide(21.7, {"perclos": 0.0}, False, True)
-        self.assertEqual("ALERTA_CRITICA", state)
-
-    def test_face_loss_resets_sustained_calibrated_profile(self):
-        self.detector.calibrated_profile = "ASLEEP"
-        self.detector.calibrated_profile_confidence = 0.9
-        self.detector.calibrated_profile_since = 10.0
-        self.detector.calibrated_profile_seconds = 2.0
-
-        self.detector.update({"face_detected": False})
-        self.assertEqual("ASLEEP", self.detector.calibrated_profile)
-        self.clock.advance(0.26)
-        self.detector.update({"face_detected": False})
-
-        self.assertEqual("DESCONOCIDO", self.detector.calibrated_profile)
-        self.assertEqual(0.0, self.detector.calibrated_profile_seconds)
+            result = migrated.update(measured(0.22)) or result
+            self.clock.advance(0.06)
+        self.assertTrue(result["static_ready"])
+        self.assertEqual("DYNAMIC_NATURAL", migrated.active_profile)
 
 
-class EyeSignalStabilityTests(unittest.TestCase):
-    def setUp(self):
-        self.clock = FakeClock()
-        self.detector = FatigueDetector(make_config(), clock=self.clock)
-        self.detector.reset()
+class DetectorProfileTests(unittest.TestCase):
+    def test_apply_calibration_keeps_legacy_threshold_properties(self):
+        detector = FatigueDetector(default_config(), clock=FakeClock())
+        profile = {
+            "format_version": 2,
+            "eyes": {
+                "left": {"open": 0.32, "reduced": 0.22, "closed": 0.10},
+                "right": {"open": 0.31, "reduced": 0.21, "closed": 0.09},
+                "combined": {"open": 0.315, "reduced": 0.215, "closed": 0.095},
+            },
+            "partial_closure_normalized": 0.45,
+            "blink_baseline": {"selected": {"event_count": 5,
+                "median_seconds": 0.18, "p90_seconds": 0.25}},
+            "neutral_head_pose": {"pitch": 3.0, "yaw": 0.0, "roll": 0.0},
+            "thresholds": {"drowsy_ear_threshold": 0.27,
+                "ear_threshold": 0.16, "ear_open_threshold": 0.18,
+                "open_pitch_reference": 3.0},
+        }
 
-    def feed(self, ear, reliable=True, seconds=0.05):
-        sample = metrics(ear)
-        sample["ear_raw"] = ear
-        sample["eye_reliable"] = reliable
-        state, _ = self.detector.update(sample)
-        self.clock.advance(seconds)
-        return state, sample
-
-    def close_eyes(self):
-        for _ in range(3):
-            self.feed(0.12)
-        self.assertTrue(self.detector.eye_closed)
-
-    def test_two_spurious_open_samples_do_not_break_microsleep(self):
-        self.close_eyes()
-        closed_since = self.detector.closed_since
-
-        self.feed(0.32)
-        self.feed(0.32)
-        self.feed(0.12)
-        self.feed(0.12)
-
-        self.assertTrue(self.detector.eye_closed)
-        self.assertEqual(closed_since, self.detector.closed_since)
-
-    def test_sustained_opening_is_confirmed_and_resets_closure(self):
-        self.close_eyes()
-        for _ in range(6):
-            self.feed(0.32)
-
-        self.assertFalse(self.detector.eye_closed)
-        self.assertIsNone(self.detector.closed_since)
-
-    def test_blurred_sample_is_held_instead_of_treated_as_open(self):
-        self.close_eyes()
-        _, sample = self.feed(0.32, reliable=False)
-
-        self.assertTrue(self.detector.eye_closed)
-        self.assertEqual("RETENIDO", sample["eye_signal_status"])
-
-    def test_sustained_closure_reaches_microsleep_alert(self):
-        state = "NORMAL"
-        for _ in range(22):
-            state, _ = self.feed(0.12)
-
-        self.assertIn(state, ("ALERTA", "ALERTA_CRITICA"))
-
-    def test_recovery_timer_releases_alert_after_configured_delay(self):
-        self.detector.state = "ALERTA"
-
-        state, reason = self.detector._decide(10.0, {"perclos": 0.0}, False, True)
-        self.assertEqual("ALERTA", state)
-        self.assertIn("Periodo de recuperacion", reason)
-        self.assertEqual(10.0, self.detector.recovery_since)
-
-        state, _ = self.detector._decide(10.9, {"perclos": 0.0}, False, True)
-        self.assertEqual("ALERTA", state)
-
-        state, _ = self.detector._decide(11.01, {"perclos": 0.0}, False, True)
-        self.assertEqual("NORMAL", state)
-        self.assertIsNone(self.detector.recovery_since)
-
-    def test_risk_reappearance_restarts_recovery_timer(self):
-        self.detector.state = "ALERTA"
-        self.detector._decide(20.0, {"perclos": 0.0}, False, True)
-
-        self.detector.closed_duration = 0.90
-        state, _ = self.detector._decide(20.5, {"perclos": 0.0}, True, True)
-        self.assertEqual("ALERTA", state)
-        self.assertIsNone(self.detector.recovery_since)
-
-        self.detector.closed_duration = 0.0
-        state, _ = self.detector._decide(21.0, {"perclos": 0.0}, False, True)
-        self.assertEqual("ALERTA", state)
-        self.assertEqual(21.0, self.detector.recovery_since)
-
-        state, _ = self.detector._decide(22.01, {"perclos": 0.0}, False, True)
-        self.assertEqual("NORMAL", state)
-        self.assertIsNone(self.detector.recovery_since)
+        self.assertTrue(detector.apply_calibration(profile))
+        self.assertAlmostEqual(0.27, detector.drowsy_ear_threshold)
+        self.assertAlmostEqual(0.16, detector.ear_threshold)
+        self.assertAlmostEqual(0.18, detector.ear_open_threshold)
+        self.assertAlmostEqual(3.0, detector.head_pitch_baseline)
 
 
 class PresentationCalibrationKeyTests(unittest.TestCase):
-    def test_o_s_d_keys_select_distinct_profiles(self):
+    def test_keys_use_reduced_closed_dynamic_and_full_names(self):
         selected = []
 
         class FakeApp(object):
             def start_calibration(self, profile):
                 selected.append(profile)
 
-        ui = PresentationUI(make_config())
+        ui = PresentationUI(default_config())
         app = FakeApp()
-        ui.handle_key(ord("o"), app)
-        ui.handle_key(ord("s"), app)
-        ui.handle_key(ord("d"), app)
+        for key in ("o", "s", "d", "b", "c"):
+            ui.handle_key(ord(key), app)
 
-        self.assertEqual(["OPEN", "DROWSY", "ASLEEP"], selected)
+        self.assertEqual(
+            ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "FULL"], selected
+        )
 
 
 if __name__ == "__main__":

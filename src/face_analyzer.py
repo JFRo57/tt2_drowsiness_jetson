@@ -98,6 +98,9 @@ class FaceAnalyzer(object):
         self.min_eye_sharpness = max(
             0.0, float(scfg.get("min_eye_sharpness", 12.0))
         )
+        self.eye_quality_threshold = max(
+            0.0, min(1.0, float(scfg.get("eye_quality_threshold", 0.25)))
+        )
         self.max_eye_ear_difference = max(
             0.01, float(scfg.get("max_eye_ear_difference", 0.12))
         )
@@ -106,6 +109,17 @@ class FaceAnalyzer(object):
         )
         self.max_eye_yaw_degrees = max(
             5.0, float(scfg.get("max_eye_yaw_degrees", 32.0))
+        )
+        self.max_single_eye_yaw_degrees = max(
+            self.max_eye_yaw_degrees,
+            float(scfg.get("max_single_eye_yaw_degrees", 42.0)),
+        )
+        vision_cfg = config.get("vision_reliability", {})
+        self.max_pose_pitch_degrees = float(
+            vision_cfg.get("max_pose_pitch_degrees", 42.0)
+        )
+        self.max_pose_roll_degrees = float(
+            vision_cfg.get("max_pose_roll_degrees", 35.0)
         )
         ear_window = max(1, int(scfg.get("ear_median_window", 3)))
         if ear_window % 2 == 0:
@@ -224,11 +238,11 @@ class FaceAnalyzer(object):
         pitch, yaw, roll = self.last_pose
         quality = self.quality_score(rect, landmarks, gray.shape)
         eye_sharpness = self.eye_sharpness(gray, raw_left_eye, raw_right_eye)
+        left_eye_sharpness = self.one_eye_sharpness(gray, raw_left_eye)
+        right_eye_sharpness = self.one_eye_sharpness(gray, raw_right_eye)
         eye_ear_difference = abs(left_ear - right_ear)
-        eye_width = min(
-            point_distance(raw_left_eye[0], raw_left_eye[3]),
-            point_distance(raw_right_eye[0], raw_right_eye[3]),
-        )
+        left_eye_width = point_distance(raw_left_eye[0], raw_left_eye[3])
+        right_eye_width = point_distance(raw_right_eye[0], raw_right_eye[3])
         symmetry_limit = max(
             0.035,
             min(
@@ -236,13 +250,39 @@ class FaceAnalyzer(object):
                 self.max_eye_ear_difference_ratio * max(ear_raw, 1e-6),
             ),
         )
+        pose_reliable = bool(
+            pitch is not None
+            and yaw is not None
+            and roll is not None
+            and abs(float(pitch)) <= self.max_pose_pitch_degrees
+            and abs(float(yaw)) <= self.max_single_eye_yaw_degrees
+            and abs(float(roll)) <= self.max_pose_roll_degrees
+        )
+        common_eye_quality = bool(
+            quality >= self.eye_quality_threshold
+            and pose_reliable
+        )
+        left_eye_reliable = bool(
+            common_eye_quality
+            and left_eye_width >= self.min_eye_width_pixels
+            and left_eye_sharpness >= self.min_eye_sharpness
+            and 0.03 <= left_ear <= 0.60
+        )
+        right_eye_reliable = bool(
+            common_eye_quality
+            and right_eye_width >= self.min_eye_width_pixels
+            and right_eye_sharpness >= self.min_eye_sharpness
+            and 0.03 <= right_ear <= 0.60
+        )
+        if yaw is not None and abs(float(yaw)) > self.max_eye_yaw_degrees:
+            if float(yaw) > 0.0:
+                right_eye_reliable = False
+            else:
+                left_eye_reliable = False
         eye_reliable = bool(
-            quality >= 0.25
-            and eye_width >= self.min_eye_width_pixels
-            and eye_sharpness >= self.min_eye_sharpness
-            and 0.04 <= ear_raw <= 0.60
+            left_eye_reliable
+            and right_eye_reliable
             and eye_ear_difference <= symmetry_limit
-            and (yaw is None or abs(float(yaw)) <= self.max_eye_yaw_degrees)
         )
         if eye_reliable:
             self.ear_history.append(ear_raw)
@@ -271,12 +311,17 @@ class FaceAnalyzer(object):
             "ear_raw": ear_raw,
             "ear": ear,
             "eye_reliable": eye_reliable,
+            "left_eye_reliable": left_eye_reliable,
+            "right_eye_reliable": right_eye_reliable,
             "eye_sharpness": eye_sharpness,
+            "left_eye_sharpness": left_eye_sharpness,
+            "right_eye_sharpness": right_eye_sharpness,
             "eye_ear_difference": eye_ear_difference,
             "mar": mar,
             "pitch": pitch,
             "yaw": yaw,
             "roll": roll,
+            "pose_reliable": pose_reliable,
             "gaze": self.last_gaze,
             "quality": quality,
             "brightness": brightness,
@@ -519,6 +564,20 @@ class FaceAnalyzer(object):
         y1 = min(gray.shape[0], y + height + pad_y)
         roi = gray[y0:y1, x0:x1]
         if roi.size < 64:
+            return 0.0
+        return float(cv2.Laplacian(roi, cv2.CV_32F).var())
+
+    @staticmethod
+    def one_eye_sharpness(gray, eye):
+        x, y, width, height = cv2.boundingRect(eye.astype(np.int32))
+        pad_x = max(2, int(width * 0.12))
+        pad_y = max(2, int(height * 0.50))
+        x0 = max(0, x - pad_x)
+        y0 = max(0, y - pad_y)
+        x1 = min(gray.shape[1], x + width + pad_x)
+        y1 = min(gray.shape[0], y + height + pad_y)
+        roi = gray[y0:y1, x0:x1]
+        if roi.size < 24:
             return 0.0
         return float(cv2.Laplacian(roi, cv2.CV_32F).var())
 

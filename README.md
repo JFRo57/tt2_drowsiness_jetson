@@ -1,4 +1,4 @@
-# TT2 Drowsiness Jetson V3
+# TT2 Drowsiness Jetson V4
 
 > **Detección de somnolencia optimizada para NVIDIA Jetson Nano, con calibración personal, interfaz en tiempo real y alertas GPIO.**
 
@@ -13,7 +13,7 @@
 
 ## 📌 Descripción general
 
-**TT2 Drowsiness Jetson V3** es un sistema embebido para detectar señales de
+**TT2 Drowsiness Jetson V4** es un sistema embebido para detectar señales de
 somnolencia y distracción mediante una cámara CSI. Procesa video en tiempo real,
 localiza el rostro y sus 68 puntos faciales, calcula métricas como **EAR**,
 **MAR**, **PERCLOS**, pose de cabeza y dirección de mirada, y clasifica el nivel
@@ -33,14 +33,16 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - Estimación de **68 landmarks** con dlib y estabilización temporal contra
   vibraciones del vehículo.
 - Cálculo de **EAR**, **MAR**, **PERCLOS**, mirada y pose de cabeza.
-- Detección temporal de ojos cerrados, bostezos, cabeceo y pérdida de rostro.
-- Estados escalonados: normal, prealerta, alerta y alerta crítica.
-- Calibración supervisada de tres perfiles personales: **ojos abiertos**,
-  **posible somnolencia** y **dormido**, durante la sesión.
+- Eventos temporales completos de parpadeo, cierre sostenido, bostezo y cabeceo.
+- Máquinas paralelas de somnolencia y confiabilidad de visión, con histéresis,
+  recuperación pegajosa y salto crítico desde cualquier estado operativo.
+- Calibración supervisada de **ojos normalmente abiertos**, **apertura ocular
+  reducida** y **ojos completamente cerrados**, seguida de observación de
+  parpadeos naturales.
 - Umbrales EAR derivados de cada persona, sin asumir un tamaño o forma ocular
   universal.
-- Mediana temporal, histéresis y confirmación de apertura para que cuadros
-  borrosos o aperturas espurias no interrumpan un microsueño.
+- Mediana temporal, histéresis y validación por ojo; los datos inválidos no se
+  convierten en ojos cerrados ni interrumpen un cierre ocular válido.
 - Interfaz OpenCV con métricas, landmarks, FPS y estado del hardware.
 - Modos de operación **AUTOMATIC**, **MAINTENANCE** y **EMERGENCY**.
 - Ejecución con GPIO físico o en modo completamente simulado.
@@ -53,9 +55,11 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - CLAHE adaptativo, pose/mirada desacopladas y PERCLOS incremental.
 - Objetivo de análisis configurable de **20 FPS** y telemetría por etapa en la
   interfaz.
-- Registro opcional de transiciones de estado en CSV.
-- Pruebas unitarias de calibración anatómica, microsueños, vibración simulada,
-  estados, GPIO/PWM y ruta optimizada.
+- Perfil de calibración versionado y guardado de forma atómica, con migración
+  segura de perfiles heredados compatibles.
+- Registro CSV estructurado y amortiguado de transiciones, eventos y métricas.
+- Pruebas unitarias de calibración, cierres críticos, visión degradada,
+  multimodalidad, histéresis, GPIO/PWM y ruta optimizada.
 
 ---
 
@@ -84,8 +88,12 @@ flowchart LR
     GPU --> FACE[dlib 68 landmarks]
     GPU -. fallo .-> FALLBACK[OpenCV CUDA FP16 / HOG CPU]
     FALLBACK --> FACE
-    FACE --> STABLE[ROI + landmarks + EAR robusto]
-    STABLE --> FATIGUE[FatigueDetector]
+    FACE --> RAW[EAR por ojo + MAR + pose + calidad]
+    RAW --> NORM[Cierre ocular normalizado]
+    NORM --> EVENTS[Eventos + ventanas 3/25/60 s]
+    RAW --> VISION[Confiabilidad de visión]
+    EVENTS --> FATIGUE[Máquina de somnolencia]
+    VISION --> FATIGUE
     FATIGUE --> ALERT[AlertController]
     SWITCH[Switch de 3 estados] --> GPIO[GPIOController]
     ALERT --> GPIO
@@ -100,7 +108,7 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 
 ---
 
-## ⚡ Rendimiento de la V3
+## ⚡ Rendimiento de la V4
 
 La optimización conserva el predictor dlib de 68 puntos y todo el hardware de
 la versión base. El trabajo se reduce en los lugares de mayor costo:
@@ -119,7 +127,7 @@ la versión base. El trabajo se reduce en los lugares de mayor costo:
 Benchmark realizado en esta Jetson Nano, cámara CSI a procesamiento
 **640×360**, escena sin rostro:
 
-| Métrica V3 | Resultado |
+| Métrica V4 | Resultado |
 | :--- | ---: |
 | FPS del analizador | 29.189, limitado por cámara a ~30 FPS |
 | Latencia media | 10.526 ms |
@@ -174,8 +182,8 @@ python3 scripts/benchmark_pipeline.py --seconds 10 --warmup 2
 1. **Clonar el repositorio:**
 
    ```bash
-   git clone --branch v3 https://github.com/JFRo57/tt2_drowsiness_jetson.git tt2_drowsiness_jetson_v3
-   cd tt2_drowsiness_jetson_v3
+   git clone --branch v4 https://github.com/JFRo57/tt2_drowsiness_jetson.git tt2_drowsiness_jetson_v4
+   cd tt2_drowsiness_jetson_v4
    ```
 
 2. **Crear un entorno virtual reutilizando los paquetes de JetPack:**
@@ -291,7 +299,7 @@ sonando. Por ello no debe utilizarse sobre BOARD 33 con este buzzer.
 Activa siempre el entorno virtual independiente de esta versión:
 
 ```bash
-cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v4
 source .venv/bin/activate
 ```
 
@@ -362,10 +370,12 @@ se envía en paralelo a la interfaz, los LEDs y el buzzer:
 
 | Estado | LED físico | Buzzer |
 |---|---|---|
-| `NORMAL` / `PARPADEO` | Verde continuo | Apagado |
-| `POSIBLE_SOMNOLENCIA` | Amarillo intermitente | Pulsos a 2500 Hz |
-| `ALERTA` | Rojo intermitente | Pulsos a 3500 Hz |
-| `ALERTA_CRITICA` | Rojo intermitente rápido | Pulsos a 4500 Hz |
+| `ALERTA` | Verde continuo | Apagado |
+| `SOSPECHA` | Amarillo intermitente | Aviso breve a 2500 Hz |
+| `SOMNOLENCIA` | Rojo intermitente | Patrón a 3500 Hz |
+| `CRITICO` | Rojo intermitente rápido | Patrón prioritario a 4500 Hz |
+| `RECUPERACION` | Amarillo/rojo alterno | Apagado |
+| Supervisión de cámara/rostro | Patrón amarillo distinto | Aviso a 3000 Hz |
 
 La aplicación actualiza los patrones aunque la cámara tarde o pierda cuadros.
 Cuando se solicita GPIO físico, un fallo de inicialización detiene el arranque
@@ -384,33 +394,39 @@ una representación alternativa y no controla los componentes.
 | `2` | Modo mantenimiento simulado |
 | `3` | Paro de emergencia simulado |
 | `O` | Calibrar perfil **ojos abiertos** |
-| `S` | Calibrar perfil **posible somnolencia** |
-| `D` | Calibrar perfil **dormido / ojos cerrados** |
-| `C` | Alias compatible de `O` |
+| `S` | Repetir **apertura ocular reducida** |
+| `D` | Repetir **ojos completamente cerrados** |
+| `B` | Repetir observación dinámica de parpadeos |
+| `C` | Reiniciar la calibración completa |
 | `L` | Mostrar u ocultar landmarks |
 | `I` | Mostrar u ocultar el panel de información |
+| `V` | Activar o desactivar métricas de depuración |
 | `M` | Silenciar o reactivar el buzzer |
 | `P` | Pausar o reanudar la visualización |
 | `R` | Reiniciar las métricas temporales |
 | `Q` / `Esc` | Cerrar la aplicación |
 
-### Calibración de los tres estados
+### Calibración personalizada
 
 Realiza la calibración con el vehículo detenido, la cámara en su posición final
 y una iluminación similar a la de uso:
 
-1. Presiona `O` y permanece aproximadamente 5 segundos mirando al frente, con
-   los ojos abiertos y una postura normal.
-2. Presiona `S` y simula posible somnolencia durante 5 segundos: párpados
-   entrecerrados, expresión relajada y una inclinación ligera y natural.
-3. Presiona `D` y mantén durante 5 segundos los ojos cerrados y la postura de
-   cabeza que se desea reconocer como dormido.
-4. Comprueba en el panel que aparezca `O:OK S:OK D:OK`. A partir de ese
-   momento se muestran el perfil detectado, su confianza y su duración.
+1. Pulsa `C`. Mira al frente con postura natural, ojos normalmente abiertos y
+   sin exagerar la apertura durante la primera etapa.
+2. Cuando se indique, mantén una apertura ocular reducida sin cerrar los ojos.
+   Es una referencia geométrica intermedia, no una declaración de somnolencia.
+3. Cierra los ojos de forma natural durante la tercera etapa.
+4. Mira al frente con normalidad durante la observación dinámica. El sistema
+   acepta únicamente ciclos abierto→cerrado→abierto. Si obtiene pocos eventos,
+   solicitará de cinco a ocho parpadeos voluntarios normales como referencia
+   secundaria.
+5. El monitoreo comienza sólo cuando las etapas y el perfil completo son
+   válidos. `O`, `S`, `D` y `B` permiten repetir únicamente la parte indicada.
 
-Las muestras con baja calidad se descartan. Los valores EAR deben quedar
-separados en el orden abierto > somnoliento > dormido; si se superponen, el
-sistema rechaza el conjunto para evitar un clasificador ambiguo.
+Cada etapa usa medianas izquierda, derecha y conjunta, dispersión, cobertura y
+estabilidad de pose. Debe cumplirse abierto > reducido > cerrado por ojo, con
+márgenes configurables y consistencia bilateral. Un fallo explica la etapa que
+debe repetirse y nunca sobrescribe el último perfil válido.
 
 La calibración es **individual**, no étnica: aprende la apertura ocular y la
 postura de esa persona concreta. Esto cubre diferencias de párpado, tamaño de
@@ -419,12 +435,15 @@ origen. Debe repetirse si cambia el conductor, la cámara o los lentes.
 
 > **Seguridad:** calibra siempre con el vehículo estacionado. Este proyecto es
 > un prototipo de asistencia; una alarma no vuelve seguro continuar conduciendo
-> con sueño y no sustituye detenerse en un lugar seguro.
+> con sueño y no sustituye detenerse en un lugar seguro. Una cámara no puede
+> confirmar clínicamente un microsueño; valida cierres y alertas sólo en
+> simulador, vehículo estacionado o entorno controlado.
 
-**dlib no se reentrena:** continúa extrayendo los 68 landmarks. El clasificador
-de sesión combina **EAR, MAR, pitch, yaw, roll y mirada** para comparar cada
-frame con los tres perfiles personales. La calibración se mantiene en memoria,
-por lo que debe repetirse al reiniciar el programa.
+**dlib no se reentrena:** continúa extrayendo los 68 landmarks. El cierre se
+normaliza por ojo como `(EAR_abierto - EAR_actual) / (EAR_abierto -
+EAR_cerrado)`, limitado a `[0,1]`. El perfil se guarda atómicamente en
+`calibration_profile.json` y se reutiliza sólo si su versión y calidad son
+compatibles.
 
 ---
 
@@ -489,16 +508,26 @@ Los parámetros de `stability` controlan la robustez dentro del vehículo:
 - `min_eye_sharpness`, `max_eye_ear_difference` y `max_eye_yaw_degrees`
   determinan cuándo una observación ocular es confiable.
 
+Las secciones nuevas centralizan toda la decisión: `calibration` valida y
+persiste el perfil; `fatigue` define niveles normalizados, ventanas, tiempos de
+estado y fusión; `vision_reliability` controla pérdida de rostro, calidad y
+FPS; `alerts` contiene tonos, ciclos y ritmos LED; `logging` configura
+instantáneas y vaciado; `interface.debug_overlay` desactiva el panel detallado.
+Los valores incluidos son parámetros iniciales de ingeniería para validación
+controlada, no límites médicos ni certificación automotriz.
+
 ---
 
 ## 🚨 Niveles de alerta
 
 | Estado | Indicador | Buzzer |
 | :--- | :--- | :--- |
-| `NORMAL` / `PARPADEO` | LED verde | Apagado |
-| `POSIBLE_SOMNOLENCIA` | LED amarillo intermitente | 2500 Hz, 3 pulsos |
-| `ALERTA` | LED rojo intermitente | 3500 Hz, patrón recurrente |
-| `ALERTA_CRITICA` | LED rojo rápido | 4500 Hz, patrón recurrente rápido |
+| `ALERTA` | LED verde | Apagado |
+| `SOSPECHA` | LED amarillo intermitente | Aviso breve a 2500 Hz |
+| `SOMNOLENCIA` | LED rojo intermitente | Patrón recurrente a 3500 Hz |
+| `CRITICO` | LED rojo rápido | Patrón prioritario a 4500 Hz |
+| `RECUPERACION` | Amarillo/rojo alterno | Apagado |
+| `ROSTRO_NO_VISIBLE` / fallo de cámara | Patrón de supervisión | 3000 Hz |
 | `MANTENIMIENTO` | LED amarillo fijo | Apagado |
 | `PARO_EMERGENCIA` | LED rojo fijo | Apagado |
 
@@ -522,10 +551,10 @@ python3 -m json.tool config.json >/dev/null
 Las pruebas GPIO unitarias utilizan un sysfs temporal y no activan el buzzer
 físico. Para validar el hardware utiliza `--gpio-self-test`.
 
-El estado validado de V3 es de **31 pruebas unitarias aprobadas**. La suite
-cubre calibración personal y rechazo de perfiles superpuestos, histéresis y
-confirmación ocular, microsueños, cuadros no confiables, pérdida breve de
-rostro, vibración simulada, PERCLOS, estados, GPIO/PWM y la ruta optimizada.
+La suite cubre calibración personal y perfiles heredados, eventos oculares,
+apertura reducida, cierres críticos, multimodalidad, visión degradada, pérdida
+de rostro, FPS variable, PERCLOS con cobertura, recuperación/recaída,
+histéresis, prioridades de alerta, GPIO/PWM y la ruta optimizada.
 
 Para medir exclusivamente cámara y visión, sin interfaz ni GPIO:
 
@@ -539,7 +568,7 @@ python3 scripts/benchmark_accelerators.py
 ## 📁 Estructura del proyecto
 
 ```text
-tt2_drowsiness_jetson_v3/
+tt2_drowsiness_jetson_v4/
 ├── main.py                         # Punto de entrada y argumentos CLI
 ├── config.json                     # Configuración principal
 ├── DOCUMENTACION_PROYECTO.md       # Documentación técnica completa
@@ -556,6 +585,8 @@ tt2_drowsiness_jetson_v3/
 │   ├── face_analyzer.py            # Rostro, landmarks y métricas
 │   ├── face_detector.py            # Backend CUDA con fallback automático
 │   ├── fatigue_detector.py         # Máquina de estados de fatiga
+│   ├── temporal_events.py           # Normalización, eventos y ventanas
+│   ├── vision_reliability.py        # Máquina paralela de confiabilidad
 │   ├── alert_controller.py         # Patrones visuales y auditivos
 │   ├── gpio_controller.py          # GPIO, PWM nativo y simulación
 │   ├── mode_controller.py          # Modos de operación
@@ -566,6 +597,9 @@ tt2_drowsiness_jetson_v3/
 └── tests/
     ├── test_application_outputs.py
     ├── test_calibration.py
+    ├── test_temporal_state_machine.py
+    ├── test_alert_controller.py
+    ├── test_event_logger.py
     ├── test_component_tester.py
     ├── test_gpio_controller.py
     └── test_performance.py
@@ -616,8 +650,7 @@ reposo debe ser **HIGH**, implementado como PWM habilitado al 100 %.
 
 ### Hay falsas alertas
 
-- Completa los tres perfiles con `O`, `S` y `D` hasta ver
-  `O:OK S:OK D:OK`.
+- Ejecuta `C` y completa las tres etapas más la observación de parpadeos.
 - Compara en el panel **EAR crudo** y **EAR filtrado**, y revisa el estado de
   señal ocular. `RETENIDO` ocasional es normal; `NO_CONFIABLE` frecuente indica
   desenfoque, giro lateral, oclusión o encuadre insuficiente.
@@ -628,6 +661,12 @@ reposo debe ser **HIGH**, implementado como PWM habilitado al 100 %.
 - Ajusta `stability` únicamente después de observar o registrar el problema.
   No copies `ear_threshold` entre personas ni lo uses como primera corrección:
   con `use_session_calibration=true` es solo el respaldo previo a calibrar.
+
+La cámara y los landmarks no siempre pueden diferenciar una cámara tapada de
+un asiento vacío, ni un bostezo de todas las actividades de boca posibles. La
+máquina reduce esos falsos positivos mediante calidad, ciclos completos,
+duración y fusión multimodal, pero estas limitaciones requieren validación
+física en el montaje final.
 
 ---
 

@@ -9,6 +9,7 @@ class PresentationUI(object):
         self.window = "Detector de somnolencia para conductores"
         self.show_landmarks = bool(self.config.get("show_landmarks", True))
         self.show_panel = bool(self.config.get("show_information_panel", True))
+        self.debug_overlay = bool(self.config.get("debug_overlay", False))
         self.paused = False
         self.created = False
         self.drawn_once = False
@@ -38,11 +39,11 @@ class PresentationUI(object):
                     if pts is not None:
                         cv2.drawContours(view, [cv2.convexHull(pts)], -1, color, 1)
         state = detector.state
-        if state in ("ALERTA", "ALERTA_CRITICA", "PARO_EMERGENCIA", "ERROR"):
+        if state in ("SOMNOLENCIA", "CRITICO", "PARO_EMERGENCIA", "ERROR"):
             color = (0, 0, 255)
-            scale = 0.9 if state != "ALERTA_CRITICA" else 1.2
+            scale = 0.9 if state != "CRITICO" else 1.2
             cv2.putText(view, state, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 3)
-        elif state == "POSIBLE_SOMNOLENCIA":
+        elif state in ("SOSPECHA", "RECUPERACION"):
             cv2.putText(view, state, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
         if metrics.get("calibration_active"):
             self._draw_calibration_overlay(view, metrics)
@@ -60,7 +61,7 @@ class PresentationUI(object):
 
     def _add_panel(self, frame, m, detector, mode_controller, gpio, capture_fps, analysis_fps, hardware_mode):
         panel_w = 460
-        h = max(frame.shape[0], 1050)
+        h = max(frame.shape[0], 1050 if self.debug_overlay else 430)
         shape = (h, frame.shape[1] + panel_w, 3)
         if self._panel_canvas is None or self._panel_shape != shape:
             self._panel_canvas = np.empty(shape, dtype=np.uint8)
@@ -82,19 +83,30 @@ class PresentationUI(object):
                 m.get("face_detector_fallback", "ninguno")[:38] or "ninguno"),
             "Modo: %s (%s)" % (mode_controller.mode, mode_controller.source),
             "Estado: %s" % detector.state,
+            "Vision: %s" % m.get("vision_state", "INICIALIZANDO"),
             "Motivo: %s" % detector.reason[:38],
             "Rostro detectado: %s" % ("SI" if m.get("face_detected") else "NO"),
             "Calidad: %.2f" % m.get("quality", 0.0),
             "EAR izq/der/crudo: %.3f / %.3f / %.3f" % (m.get("left_ear", 0.0), m.get("right_ear", 0.0), m.get("ear_raw", m.get("ear", 0.0))),
             "EAR filtrado: %s" % self._fmt3(m.get("ear_filtered", m.get("ear"))),
-            "Senal ocular: %s (%s)" % (m.get("eye_signal_status", "--"), "OK" if m.get("eye_decision_reliable") else "NO CONFIABLE"),
+            "Cierre norm izq/der: %s / %s" % (
+                self._fmt3(m.get("left_closure_normalized")),
+                self._fmt3(m.get("right_closure_normalized")),
+            ),
+            "Cierre normalizado: %s" % self._fmt3(m.get("closure_normalized")),
+            "Evento ocular: %s (%s)" % (
+                m.get("eye_event_state", "--"),
+                "PARCIAL" if m.get("eye_measurement_partial")
+                else ("VALIDO" if m.get("eye_measurement_valid")
+                      else "NO CONFIABLE"),
+            ),
             "Nitidez/diferencia: %.1f / %.3f" % (m.get("eye_sharpness", 0.0), m.get("eye_ear_difference", 0.0)),
             "Umbral cerrar/abrir: %.3f / %.3f" % (
                 detector.ear_threshold,
                 getattr(detector, "ear_open_threshold", detector.ear_threshold),
             ),
-            "Umbral EAR somnolencia: %s" % self._fmt3(detector.drowsy_ear_threshold),
-            "Perfiles: %s" % m.get("calibration_profiles", "O:-- S:-- D:--"),
+            "Umbral apertura reducida: %s" % self._fmt3(detector.drowsy_ear_threshold),
+            "Perfiles: %s" % m.get("calibration_profiles", "O:-- R:-- C:--"),
             "Perfil detectado: %s %.0f%% / %.1f s" % (
                 m.get("calibrated_profile", "NO_CALIBRADO"),
                 float(m.get("calibrated_profile_confidence", 0.0)) * 100.0,
@@ -102,10 +114,17 @@ class PresentationUI(object):
             ),
             "Ojos cerrados estables: %.2f s" % m.get("closed_seconds", 0.0),
             "Parpadeos recientes: %s" % m.get("blink_count_recent", 0),
-            "PERCLOS: %.1f %%" % (m.get("perclos", 0.0) * 100.0),
+            "Basal parpadeo: %.3f s" % m.get("baseline_blink_median_seconds", 0.0),
+            "PERCLOS/cobertura: %.1f / %.1f %% (%s)" % (
+                m.get("perclos", 0.0) * 100.0,
+                m.get("perclos_coverage", 0.0) * 100.0,
+                "OK" if m.get("perclos_reliable") else "PARCIAL",
+            ),
             "MAR: %.3f  Bostezo: %s" % (m.get("mar", 0.0), "SI" if m.get("possible_yawn") else "NO"),
             "Pitch/Yaw/Roll: %s / %s / %s" % (self._fmt(m.get("pitch")), self._fmt(m.get("yaw")), self._fmt(m.get("roll"))),
             "Cabeceo posible: %s" % ("SI" if m.get("possible_nod") else "NO"),
+            "Cabeceos/bostezos ventana: %d / %d" % (
+                m.get("recent_nods", 0), m.get("recent_yawns", 0)),
             "Mirada: %s" % m.get("gaze", "DESCONOCIDA"),
             "Sin rostro: %.1f s" % m.get("no_face_seconds", 0.0),
             "Luminosidad media: %.1f" % m.get("brightness", 0.0),
@@ -128,13 +147,25 @@ class PresentationUI(object):
             "Hardware: %s" % hardware_mode,
             "GPIO error: %s" % (gpio.error[:36] if gpio.error else "ninguno"),
             "Teclas: 1 Auto  2 Mant  3 Paro",
-            "Prueba salidas: 4 Normal 5 Posible",
-            "6 Alerta 7 Critica 8 Sin rostro 0 Real",
-            "Calibrar: O Abiertos  S Somnolencia",
-            "D Dormido  (C = Abiertos)",
-            "L Landmarks I Panel M Mute P Pausa",
+            "Prueba: 4 Alerta 5 Sospecha 6 Somnol.",
+            "7 Critico 8 Recuperacion 0 Real",
+            "Calibrar: C Completa O Abiertos",
+            "S Apertura reducida D Cerrados B Blink",
+            "L Landmarks I Panel V Debug M Mute P Pausa",
             "R Reset  Q Salir",
         ]
+        if not self.debug_overlay:
+            lines = [
+                lines[0], lines[3], lines[5], lines[6], lines[7], lines[8],
+                "Cierre normalizado: %s" % self._fmt3(m.get("closure_normalized")),
+                "PERCLOS/cobertura: %.1f / %.1f %%" % (
+                    m.get("perclos", 0.0) * 100.0,
+                    m.get("perclos_coverage", 0.0) * 100.0,
+                ),
+                "Alerta activa: %s" % m.get("active_alert", "--"),
+                "FPS captura/analisis: %.1f / %.1f" % (capture_fps, analysis_fps),
+                "C Calibracion completa  V Debug  Q Salir",
+            ]
         for line in lines:
             cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (230, 230, 230), 1, cv2.LINE_AA)
             y += 22
@@ -148,8 +179,10 @@ class PresentationUI(object):
     def _draw_calibration_overlay(view, metrics):
         labels = {
             "OPEN": "OJOS ABIERTOS",
-            "DROWSY": "POSIBLE SOMNOLENCIA",
-            "ASLEEP": "DORMIDO / POSTURA DE SUENO",
+            "REDUCED": "APERTURA OCULAR REDUCIDA",
+            "CLOSED": "OJOS COMPLETAMENTE CERRADOS",
+            "DYNAMIC_NATURAL": "OBSERVACION NATURAL DE PARPADEOS",
+            "DYNAMIC_VOLUNTARY": "PARPADEOS VOLUNTARIOS NORMALES",
         }
         target = metrics.get("calibration_target", "")
         progress = max(0.0, min(1.0, float(metrics.get("calibration_progress", 0.0))))
@@ -223,27 +256,33 @@ class PresentationUI(object):
         elif key == ord("3"):
             app.gpio.set_simulated_mode("EMERGENCY")
         elif key == ord("4"):
-            app.set_forced_test_state("NORMAL")
-        elif key == ord("5"):
-            app.set_forced_test_state("POSIBLE_SOMNOLENCIA")
-        elif key == ord("6"):
             app.set_forced_test_state("ALERTA")
+        elif key == ord("5"):
+            app.set_forced_test_state("SOSPECHA")
+        elif key == ord("6"):
+            app.set_forced_test_state("SOMNOLENCIA")
         elif key == ord("7"):
-            app.set_forced_test_state("ALERTA_CRITICA")
+            app.set_forced_test_state("CRITICO")
         elif key == ord("8"):
-            app.set_forced_test_state("ROSTRO_NO_DETECTADO")
+            app.set_forced_test_state("RECUPERACION")
         elif key == ord("0"):
             app.set_forced_test_state(None)
-        elif key in (ord("o"), ord("O"), ord("c"), ord("C")):
+        elif key in (ord("c"), ord("C")):
+            app.start_calibration("FULL")
+        elif key in (ord("o"), ord("O")):
             app.start_calibration("OPEN")
         elif key in (ord("s"), ord("S")):
-            app.start_calibration("DROWSY")
+            app.start_calibration("REDUCED")
         elif key in (ord("d"), ord("D")):
-            app.start_calibration("ASLEEP")
+            app.start_calibration("CLOSED")
+        elif key in (ord("b"), ord("B")):
+            app.start_calibration("DYNAMIC")
         elif key in (ord("l"), ord("L")):
             self.show_landmarks = not self.show_landmarks
         elif key in (ord("i"), ord("I")):
             self.show_panel = not self.show_panel
+        elif key in (ord("v"), ord("V")):
+            self.debug_overlay = not self.debug_overlay
         elif key in (ord("m"), ord("M")):
             app.config["buzzer"]["muted"] = not app.config["buzzer"].get("muted", False)
             app.gpio.buzzer_cfg["muted"] = app.config["buzzer"]["muted"]

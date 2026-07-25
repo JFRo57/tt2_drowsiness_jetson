@@ -17,7 +17,7 @@ from .shutdown_manager import ShutdownManager
 
 
 def default_config():
-    return {
+    config = {
         "camera": {"sensor_id": 0, "capture_width": 1280, "capture_height": 720, "processing_width": 640, "processing_height": 360, "display_width": 1100, "display_height": 620, "fps": 30, "flip_method": 2, "output_format": "BGRx", "reconnect_attempts": 3},
         "dlib": {"predictor_path": "models/shape_predictor_68_face_landmarks.dat", "upsample": 0, "detection_interval_frames": 12, "no_face_detection_interval_frames": 3, "detector_scale": 0.5, "tracking_mode": "landmarks", "use_correlation_tracker": False, "tracker_quality_threshold": 6.5, "pose_interval_frames": 2, "gaze_interval_frames": 2},
         "face_detection": {"backend": "auto", "backend_order": ["dlib_cnn_cuda", "opencv_cuda_fp16", "dlib_hog"], "allow_fallback": True, "warmup": True, "confidence_threshold": 0.55, "dlib_cnn_model_path": "models/mmod_human_face_detector.dat", "opencv_config_path": "models/deploy.prototxt", "opencv_model_path": "models/res10_300x300_ssd_iter_140000_fp16.caffemodel"},
@@ -33,6 +33,85 @@ def default_config():
         "interface": {"presentation_enabled": True, "show_landmarks": True, "show_information_panel": True, "show_virtual_leds": True, "close_action": "FULL_SHUTDOWN"},
         "logging": {"enabled": False, "events_only": True, "path": "logs/events.csv", "save_images": False, "record_video": False},
     }
+    config["stability"].update({"max_single_eye_yaw_degrees": 42.0})
+    config["fatigue"].update({
+        "critical_closed_seconds": 2.0,
+        "allow_single_eye": True, "single_eye_critical_enabled": False,
+        "blink_start_closure_level": 0.35,
+        "blink_closed_closure_level": 0.75, "blink_reopen_level": 0.25,
+        "blink_event_max_seconds": 4.0, "deep_closure_level": 0.80,
+        "partial_closure_hysteresis": 0.05,
+        "reduced_opening_sustain_seconds": 1.5,
+        "sustained_closure_seconds": 0.8, "severe_closure_seconds": 1.2,
+        "closure_with_head_drop_seconds": 0.8,
+        "unreliable_event_abort_seconds": 0.4,
+        "prolonged_blink_absolute_seconds": 0.55,
+        "prolonged_blink_relative_multiplier": 1.8,
+        "prolonged_blinks_strong_count": 2,
+        "fast_window_seconds": 3.0, "medium_window_seconds": 25.0,
+        "long_window_seconds": 60.0, "perclos_min_coverage": 0.65,
+        "perclos_min_valid_seconds": 15.0,
+        "mouth_open_threshold": 0.48, "mouth_wide_threshold": 0.65,
+        "mouth_closed_threshold": 0.38, "yawn_wide_sustain_seconds": 0.65,
+        "repeated_yawn_count": 2, "head_down_direction": 1.0,
+        "head_down_pitch_threshold": 18.0,
+        "head_recover_pitch_threshold": 8.0,
+        "head_lateral_turn_threshold": 28.0,
+        "head_drop_velocity_degrees_per_second": 28.0,
+        "head_down_sustain_seconds": 0.8, "repeated_nod_count": 2,
+        "severe_closures_critical_count": 2,
+        "critical_minimum_hold_seconds": 2.0,
+        "critical_open_recovery_seconds": 2.0,
+        "recovery_open_closure_level": 0.25,
+        "recovery_observation_seconds": 8.0,
+        "recovery_relapse_closed_seconds": 0.8,
+        "suspicion_to_somnolence_seconds": 4.0,
+        "suspicion_clear_seconds": 8.0, "somnolence_clear_seconds": 10.0,
+    })
+    config["vision_reliability"] = {
+        "initial_valid_seconds": 0.5, "min_quality": 0.25,
+        "min_brightness": 12.0, "max_brightness": 250.0,
+        "max_pose_pitch_degrees": 42.0, "max_pose_roll_degrees": 35.0,
+        "no_face_seconds": 2.0, "persistent_loss_seconds": 8.0,
+        "camera_failure_seconds": 6.0, "min_analysis_fps": 8.0,
+        "low_fps_grace_seconds": 3.0, "startup_fps_grace_seconds": 3.0,
+    }
+    config["calibration"].update({
+        "profile_path": "calibration_profile.json", "auto_start_if_missing": True,
+        "min_valid_sample_ratio": 0.65, "min_open_closed_gap": 0.06,
+        "max_head_angle_std_degrees": 6.0,
+        "max_eye_asymmetry_ratio": 0.35, "max_partial_eye_difference": 0.25,
+        "min_possible_ear": 0.03, "max_possible_ear": 0.60,
+        "natural_blink_observation_seconds": 8.0,
+        "voluntary_blink_observation_seconds": 15.0,
+        "min_natural_blinks": 3, "min_voluntary_blinks": 5,
+        "calibration_blink_max_seconds": 1.2, "blink_min_seconds": 0.08,
+        "blink_start_closure_level": 0.35,
+        "blink_closed_closure_level": 0.75, "blink_reopen_level": 0.25,
+        "max_dynamic_head_delta_degrees": 12.0,
+    })
+    config["alerts"] = {
+        "suspicion_frequency": 2500, "somnolence_frequency": 3500,
+        "critical_frequency": 4500, "supervision_frequency": 3000,
+        "initial_led_hz": 3.0, "calibration_led_hz": 1.2,
+        "degraded_vision_led_hz": 1.2, "suspicion_led_hz": 1.8,
+        "somnolence_led_hz": 3.0, "critical_led_hz": 7.0,
+        "recovery_led_hz": 1.0, "supervision_led_hz": 3.0,
+        "failure_led_hz": 3.0, "error_led_cycle_seconds": 1.2,
+        "error_led_pulse_seconds": 0.15, "error_led_gap_seconds": 0.15,
+        "suspicion_notice_seconds": 3.0, "suspicion_cycle_seconds": 1.2,
+        "suspicion_on_seconds": 0.2, "somnolence_cycle_seconds": 2.4,
+        "somnolence_group_seconds": 1.5, "somnolence_beat_seconds": 0.5,
+        "somnolence_on_seconds": 0.2, "critical_cycle_seconds": 2.1,
+        "critical_group_seconds": 1.5, "critical_beat_seconds": 0.3,
+        "critical_on_seconds": 0.15, "supervision_cycle_seconds": 2.0,
+        "supervision_on_seconds": 0.25,
+    }
+    config["interface"]["debug_overlay"] = True
+    config["logging"].update({
+        "snapshot_interval_seconds": 5.0, "flush_interval_seconds": 2.0,
+    })
+    return config
 
 
 def deep_update(dst, src):
@@ -52,9 +131,11 @@ class DrowsinessApplication(object):
         self.camera = CameraManager(config["camera"])
         self.gpio = GPIOController(config, force_simulation=simulation)
         self.mode = ModeController()
-        self.alerts = AlertController(self.gpio)
+        self.alerts = AlertController(self.gpio, config)
         self.detector = FatigueDetector(config)
         self.calibration = CalibrationManager(config)
+        if self.calibration.profile_data:
+            self.detector.apply_calibration(self.calibration.profile_data)
         self.logger = EventLogger(config)
         self.ui = PresentationUI(config) if config["interface"].get("presentation_enabled", True) else None
         self.face = None
@@ -81,7 +162,7 @@ class DrowsinessApplication(object):
 
     def start_calibration(self, profile="OPEN"):
         self.forced_test_state = None
-        self.detector.reset()
+        self.detector.reset(clear_history=True)
         if self.face is not None:
             self.face.reset_eye_filter()
         self.calibration.start(profile)
@@ -99,7 +180,10 @@ class DrowsinessApplication(object):
                 raise RuntimeError(self.camera.error or "No se pudo iniciar la camara")
             if self.ui:
                 self.ui.create()
-            self.detector.state = "NORMAL"
+            if (not self.calibration.ready_for_monitoring()
+                    and self.config.get("calibration", {}).get(
+                        "auto_start_if_missing", True)):
+                self.start_calibration("FULL")
             self._loop()
         except Exception as exc:
             exit_code = 1
@@ -107,7 +191,7 @@ class DrowsinessApplication(object):
             print("ERROR:", exc)
             traceback.print_exc()
             self.detector.state = "ERROR"
-            self.alerts.update("ERROR", self.mode.mode)
+            self.alerts.update("ERROR", self.mode.mode, self._vision_state())
         finally:
             self.cleanup()
         return exit_code
@@ -140,13 +224,47 @@ class DrowsinessApplication(object):
             self.mode.update_from_switch(self.gpio)
             # El estado del detector es la fuente de verdad para las salidas.
             # Mantener los patrones activos aunque la camara tarde o pierda cuadros.
-            self.alerts.update(self.detector.state, self.mode.mode)
+            self.alerts.update(
+                self.detector.state, self.mode.mode, self._vision_state()
+            )
             frame, timestamp, sequence = self.camera.wait_for_frame(
                 last_sequence,
                 timeout=self.frame_wait_timeout,
                 copy=False,
             )
+            if self.shutdown.requested:
+                break
             if frame is None:
+                missing_metrics = {
+                    "frame_available": False,
+                    "face_detected": False,
+                    "quality": 0.0,
+                }
+                state, reason = self.detector.update(
+                    missing_metrics,
+                    self.mode.mode,
+                    monitoring_enabled=self.calibration.ready_for_monitoring(),
+                    analysis_fps=self.analysis_fps,
+                    camera_error=self.camera.error,
+                )
+                if self.calibration.active:
+                    self._handle_calibration_result(
+                        self.calibration.update(missing_metrics)
+                    )
+                last_metrics.update(missing_metrics)
+                self.alerts.update(
+                    state, self.mode.mode, self._vision_state()
+                )
+                missing_metrics["active_alert"] = self.alerts.active_alert
+                self.logger.log_transition(
+                    self.mode.mode,
+                    self.detector.previous_state,
+                    state,
+                    reason,
+                    missing_metrics,
+                    self.analysis_fps,
+                    self.gpio,
+                )
                 if self.camera.error:
                     raise RuntimeError(self.camera.error)
                 if self.ui and last_frame is not None:
@@ -163,11 +281,24 @@ class DrowsinessApplication(object):
                     {"face_detected": False},
                     self.mode.mode,
                 )
-                self.alerts.update(state, self.mode.mode)
+                self.alerts.update(
+                    state, self.mode.mode, self._vision_state()
+                )
                 self._render_if_needed(last_metrics, frame)
                 continue
 
             if self.ui and self.ui.paused:
+                paused_metrics = dict(last_metrics)
+                state, reason = self.detector.update(
+                    paused_metrics,
+                    self.mode.mode,
+                    monitoring_enabled=self.calibration.ready_for_monitoring(),
+                    paused=True,
+                    analysis_fps=self.analysis_fps,
+                )
+                self.alerts.update(
+                    state, self.mode.mode, self._vision_state()
+                )
                 self._render_if_needed(last_metrics, frame)
                 continue
 
@@ -176,7 +307,10 @@ class DrowsinessApplication(object):
                 metrics["runtime_seconds"] = time.monotonic() - self.started_at
                 metrics["analysis_ms"] = self.analysis_ms
                 state, reason = self._apply_forced_test_state()
-                self.alerts.update(state, self.mode.mode)
+                self.alerts.update(
+                    state, self.mode.mode, self._vision_state()
+                )
+                metrics["active_alert"] = self.alerts.active_alert
                 self.logger.log_transition(
                     self.mode.mode,
                     self.detector.previous_state,
@@ -223,23 +357,28 @@ class DrowsinessApplication(object):
             was_calibrating = self.calibration.active
             calibration_result = self.calibration.update(metrics)
             if calibration_result is not None:
-                self.detector.apply_calibration(calibration_result)
+                self._handle_calibration_result(calibration_result)
                 metrics.update(self.calibration.status_metrics())
             if was_calibrating and not self.calibration.active:
-                self.detector.reset()
+                self.detector.events.reset(clear_history=True)
 
-            if self.calibration.active:
-                self.detector.previous_state = self.detector.state
-                self.detector.state = "CALIBRANDO"
+            state, reason = self.detector.update(
+                metrics,
+                self.mode.mode,
+                monitoring_enabled=self.calibration.ready_for_monitoring(),
+                analysis_fps=self.analysis_fps,
+            )
+            if state == "CALIBRACION":
                 self.detector.reason = self.calibration.message
-                state, reason = self.detector.state, self.detector.reason
-            else:
-                state, reason = self.detector.update(metrics, self.mode.mode)
+                reason = self.detector.reason
 
             self.analysis_ms = (time.monotonic() - analysis_started) * 1000.0
             metrics["runtime_seconds"] = time.monotonic() - self.started_at
             metrics["analysis_ms"] = self.analysis_ms
-            self.alerts.update(state, self.mode.mode)
+            self.alerts.update(
+                state, self.mode.mode, self._vision_state()
+            )
+            metrics["active_alert"] = self.alerts.active_alert
             self.logger.log_transition(
                 self.mode.mode,
                 self.detector.previous_state,
@@ -259,6 +398,20 @@ class DrowsinessApplication(object):
             self._render_if_needed(metrics, frame)
             if self.camera.error:
                 raise RuntimeError(self.camera.error)
+
+    def _handle_calibration_result(self, result):
+        if result is None:
+            return
+        if result.get("model_ready"):
+            self.detector.apply_calibration(result)
+            return
+        if not result.get("accepted"):
+            return
+        next_stage = self.calibration.next_required_stage()
+        if next_stage is not None and not self.calibration.active:
+            if self.face is not None:
+                self.face.reset_eye_filter()
+            self.calibration.start(next_stage)
 
     def _render_if_needed(self, metrics, frame=None):
         if not self.ui:
@@ -293,24 +446,28 @@ class DrowsinessApplication(object):
     def hardware_mode(self):
         return "GPIO simulado" if self.gpio.simulation_mode else "GPIO fisico"
 
+    def _vision_state(self):
+        return getattr(getattr(self.detector, "vision", None), "state", None)
+
     def set_forced_test_state(self, state):
         if state is None:
             self.forced_test_state = None
             self.detector.reset()
             return
-        if state in self.detector.STATES:
-            self.forced_test_state = state
+        canonical = self.detector.canonical_state(state)
+        if canonical in self.detector.STATES:
+            self.forced_test_state = canonical
 
     def _apply_forced_test_state(self):
         now = time.monotonic()
         self.detector.previous_state = self.detector.state
         state = self.forced_test_state
         reasons = {
-            "NORMAL": "Prueba manual de salidas: NORMAL",
-            "POSIBLE_SOMNOLENCIA": "Prueba manual de salidas: POSIBLE_SOMNOLENCIA",
             "ALERTA": "Prueba manual de salidas: ALERTA",
-            "ALERTA_CRITICA": "Prueba manual de salidas: ALERTA_CRITICA",
-            "ROSTRO_NO_DETECTADO": "Prueba manual de salidas: ROSTRO_NO_DETECTADO",
+            "SOSPECHA": "Prueba manual de salidas: SOSPECHA",
+            "SOMNOLENCIA": "Prueba manual de salidas: SOMNOLENCIA",
+            "CRITICO": "Prueba manual de salidas: CRITICO",
+            "RECUPERACION": "Prueba manual de salidas: RECUPERACION",
         }
         return self.detector._set(
             state,
