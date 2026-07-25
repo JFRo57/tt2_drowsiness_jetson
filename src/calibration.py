@@ -28,8 +28,8 @@ class CalibrationManager(object):
                  "los ojos y evite mover la cabeza"),
         "REDUCED": ("Mantenga los parpados parcialmente cerrados, sin cerrarlos "
                     "por completo"),
-        "CLOSED": ("Cierre los ojos de forma natural; haga dos cierres si la "
-                   "deteccion facial lo permite"),
+        "CLOSED": ("Cierre ambos ojos y mantengalos cerrados de forma natural "
+                   "durante toda la captura"),
         "DYNAMIC_NATURAL": "Mire al frente de manera natural durante un minuto",
         "DYNAMIC_VOLUNTARY": ("Realice entre cinco y ocho parpadeos normales, "
                               "sin exagerarlos"),
@@ -49,11 +49,20 @@ class CalibrationManager(object):
         )
         self.min_samples = int(self.config.get("min_samples", 30))
         self.quality_threshold = float(self.config.get("quality_threshold", 0.30))
+        stability = config.get("stability", {})
+        self.min_eye_width = float(stability.get("min_eye_width_pixels", 10.0))
+        self.min_eye_sharpness = float(stability.get("min_eye_sharpness", 12.0))
         self.min_valid_ratio = float(self.config.get("min_valid_sample_ratio", 0.65))
         self.min_ear_gap = float(self.config.get("min_ear_gap", 0.020))
         self.min_open_closed_gap = float(self.config.get("min_open_closed_gap", 0.060))
         self.max_ear_std = float(self.config.get("max_ear_std", 0.035))
         self.max_ear_mad = float(self.config.get("max_ear_mad", 0.025))
+        self.max_reduced_ear_std = float(
+            self.config.get("max_reduced_ear_std", 0.055)
+        )
+        self.max_reduced_ear_mad = float(
+            self.config.get("max_reduced_ear_mad", 0.040)
+        )
         self.max_head_std = float(self.config.get("max_head_angle_std_degrees", 6.0))
         self.max_eye_asymmetry_ratio = float(
             self.config.get("max_eye_asymmetry_ratio", 0.35)
@@ -73,8 +82,11 @@ class CalibrationManager(object):
         self.preparing = False
         self.awaiting_confirmation = False
         self.pending_confirmation_profile = None
+        self.initial_prompt = False
+        self.skipped = False
         self.samples = []
         self.sample_attempts = 0
+        self.sample_rejections = {}
         self.progress = 0.0
         self.profiles = {}
         self.thresholds = {}
@@ -93,6 +105,8 @@ class CalibrationManager(object):
         self.dynamic_invalid = False
         self.dynamic_natural_events = []
         self.dynamic_voluntary_events = []
+        self.dynamic_closure = None
+        self.dynamic_max_closure = 0.0
         self.dynamic_rejected_events = 0
         self._load_profile()
 
@@ -100,6 +114,53 @@ class CalibrationManager(object):
         return bool(self.model_ready and self.profile_data and not self.active
                     and not self.awaiting_confirmation
                     and not self.pending_recalibration)
+
+    def request_initial_calibration(self):
+        self.active = False
+        self.initial_prompt = True
+        self.awaiting_confirmation = True
+        self.pending_confirmation_profile = "FULL"
+        self.pending_recalibration = True
+        self.message = ("No existe una calibracion valida. Presione ESPACIO, "
+                        "ENTER o haga click para comenzar; presione N para omitir.")
+        return True
+
+    def skip_calibration(self):
+        fatigue = self.full_config.get("fatigue", {})
+        threshold = float(fatigue.get("ear_threshold", 0.22))
+        opened = max(threshold + 0.06, 0.30)
+        closed = max(0.05, threshold - 0.08)
+        reduced = (opened + closed) * 0.5
+        eyes = dict((side, {"open": opened, "reduced": reduced, "closed": closed})
+                    for side in ("left", "right", "combined"))
+        self.thresholds = {
+            "ear_threshold": threshold,
+            "ear_open_threshold": threshold + float(
+                self.full_config.get("stability", {}).get("ear_hysteresis", 0.012)
+            ),
+            "reduced_ear_threshold": (opened + reduced) * 0.5,
+            "drowsy_ear_threshold": (opened + reduced) * 0.5,
+        }
+        self.profile_data = {
+            "format_version": self.FORMAT_VERSION,
+            "eyes": eyes,
+            "partial_closure_normalized": 0.5,
+            "neutral_head_pose": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0},
+            "thresholds": dict(self.thresholds),
+            "stages": {},
+            "quality": {"fallback": True},
+            "blink_baseline": {"selected": {"source": "fallback", "event_count": 0}},
+        }
+        self.model_ready = True
+        self.static_ready = False
+        self.skipped = True
+        self.initial_prompt = False
+        self.active = False
+        self.awaiting_confirmation = False
+        self.pending_confirmation_profile = None
+        self.pending_recalibration = False
+        self.message = "Calibracion omitida; monitoreo con parametros de respaldo"
+        return self.profile_data
 
     def next_required_stage(self):
         for profile in self.STATIC_PROFILES:
@@ -109,6 +170,8 @@ class CalibrationManager(object):
 
     def start(self, profile="OPEN"):
         requested = str(profile or "OPEN").upper()
+        self.initial_prompt = False
+        self.skipped = False
         self.awaiting_confirmation = False
         self.pending_confirmation_profile = None
         if requested in ("FULL", "SEQUENCE", "CALIBRATION"):
@@ -139,6 +202,7 @@ class CalibrationManager(object):
         self.preparing = self.preparation_seconds > 0.0
         self.samples = []
         self.sample_attempts = 0
+        self.sample_rejections = {}
         self.progress = 0.0
         self.last_result = None
         self.last_failed_stage = None
@@ -154,7 +218,13 @@ class CalibrationManager(object):
         if self._preparation_active(now):
             return None
         self.sample_attempts += 1
-        self.progress = min(1.0, (now - self.started) / max(0.1, self.duration))
+        # La preparacion y la captura son periodos consecutivos. Medir desde
+        # ``started`` descontaba la preparacion de la duracion util y, a FPS
+        # bajos, hacia imposible reunir ``min_samples``.
+        self.progress = min(
+            1.0,
+            (now - self.capture_started) / max(0.1, self.duration),
+        )
         sample = self._extract_sample(metrics, require_quality=True)
         if sample is not None:
             self.samples.append(sample)
@@ -164,7 +234,7 @@ class CalibrationManager(object):
         profile = self.active_profile
         self.active = False
         self.active_profile = None
-        summary, error = self._summarize(self.samples, self.sample_attempts)
+        summary, error = self._summarize(self.samples, self.sample_attempts, profile)
         if summary is None:
             self.last_failed_stage = profile
             self.message = "Etapa %s invalida: %s. Repita solo esta etapa." % (
@@ -203,7 +273,7 @@ class CalibrationManager(object):
         self.last_result = result
         return result
 
-    def await_next_stage(self, profile):
+    def await_next_stage(self, profile, message=None):
         requested = str(profile or "").upper()
         if requested in ("DYNAMIC", "DYNAMIC_NATURAL"):
             requested = "DYNAMIC_NATURAL"
@@ -220,15 +290,17 @@ class CalibrationManager(object):
         self.progress = 0.0
         self.samples = []
         self.sample_attempts = 0
+        self.sample_rejections = {}
         self.awaiting_confirmation = True
         self.pending_confirmation_profile = requested
-        self.message = self._confirmation_message(requested)
+        self.message = message or self._confirmation_message(requested)
         return True
 
     def confirm_pending_stage(self):
         if not self.awaiting_confirmation or not self.pending_confirmation_profile:
             return False
         profile = self.pending_confirmation_profile
+        self.initial_prompt = False
         self.awaiting_confirmation = False
         self.pending_confirmation_profile = None
         self.start(profile)
@@ -292,8 +364,13 @@ class CalibrationManager(object):
             prepare_remaining = max(0.0, self.capture_started - self.clock())
         return {
             "calibration_active": self.active or self.awaiting_confirmation,
-            "calibration_target": (self.pending_confirmation_profile
-                if self.awaiting_confirmation else self.active_profile or ""),
+            "calibration_initial_prompt": self.initial_prompt,
+            "calibration_skipped": self.skipped,
+            "calibration_target": (
+                "OPEN" if self.initial_prompt else
+                (self.pending_confirmation_profile if self.awaiting_confirmation
+                 else self.active_profile or "")
+            ),
             "calibration_progress": self.progress if self.active else 0.0,
             "calibration_preparing": bool(self.active and self.preparing),
             "calibration_waiting_confirmation": bool(self.awaiting_confirmation),
@@ -306,7 +383,14 @@ class CalibrationManager(object):
             "calibration_valid_samples": (len(self.samples)
                 if self.active_profile in self.STATIC_PROFILES else 0),
             "calibration_sample_attempts": self.sample_attempts,
+            "calibration_rejections": dict(self.sample_rejections),
+            "calibration_rejection_reason": (max(
+                self.sample_rejections, key=self.sample_rejections.get
+            ) if self.sample_rejections else ""),
             "calibration_blink_count": blink_count,
+            "calibration_dynamic_state": self.dynamic_state,
+            "calibration_dynamic_closure": self.dynamic_closure,
+            "calibration_dynamic_max_closure": self.dynamic_max_closure,
             "calibration_natural_blinks": len(self.dynamic_natural_events),
             "calibration_voluntary_blinks": len(self.dynamic_voluntary_events),
             "calibrated_ear_threshold": self.thresholds.get("ear_threshold"),
@@ -318,24 +402,43 @@ class CalibrationManager(object):
                 if self.profile_data else None),
         }
 
-    def _extract_sample(self, metrics, require_quality):
+    def _reject_sample(self, reason):
+        self.sample_rejections[reason] = self.sample_rejections.get(reason, 0) + 1
+        return None
+
+    def _extract_sample(self, metrics, require_quality, allow_closed_eyes=False):
         if not metrics.get("face_detected", False):
-            return None
+            return self._reject_sample("rostro no detectado")
         quality = float(metrics.get("quality", 0.0))
         if require_quality and quality < self.quality_threshold:
-            return None
-        if require_quality and metrics.get("pose_reliable") is False:
-            return None
+            return self._reject_sample("calidad facial baja")
+        # La pose absoluta depende de donde pueda instalarse la camara en cada
+        # vehiculo. La calibracion aprende esa pose neutral y _summarize exige
+        # que sea estable; no reutiliza el limite frontal de supervision.
         fallback_eye = metrics.get("ear")
         left_ear = metrics.get("left_ear", fallback_eye)
         right_ear = metrics.get("right_ear", fallback_eye)
-        fallback_reliable = bool(metrics.get("eye_reliable", True))
-        if not bool(metrics.get("left_eye_reliable", fallback_reliable)):
-            return None
-        if not bool(metrics.get("right_eye_reliable", fallback_reliable)):
-            return None
+        raw_eye_quality = all(key in metrics for key in (
+            "left_eye_width", "right_eye_width",
+            "left_eye_sharpness", "right_eye_sharpness",
+        ))
+        if raw_eye_quality and not allow_closed_eyes:
+            if float(metrics["left_eye_width"]) < self.min_eye_width:
+                return self._reject_sample("ojo izquierdo demasiado pequeno")
+            if float(metrics["right_eye_width"]) < self.min_eye_width:
+                return self._reject_sample("ojo derecho demasiado pequeno")
+            if float(metrics["left_eye_sharpness"]) < self.min_eye_sharpness:
+                return self._reject_sample("ojo izquierdo desenfocado")
+            if float(metrics["right_eye_sharpness"]) < self.min_eye_sharpness:
+                return self._reject_sample("ojo derecho desenfocado")
+        else:
+            fallback_reliable = bool(metrics.get("eye_reliable", True))
+            if not bool(metrics.get("left_eye_reliable", fallback_reliable)):
+                return self._reject_sample("ojo izquierdo no confiable")
+            if not bool(metrics.get("right_eye_reliable", fallback_reliable)):
+                return self._reject_sample("ojo derecho no confiable")
         if not self._valid_ear(left_ear) or not self._valid_ear(right_ear):
-            return None
+            return self._reject_sample("EAR ocular ausente o fuera de rango")
         left_ear, right_ear = float(left_ear), float(right_ear)
         sample = {
             "ear": (left_ear + right_ear) * 0.5,
@@ -355,31 +458,59 @@ class CalibrationManager(object):
             and value >= float(self.config.get("min_possible_ear", 0.03))
             and value <= float(self.config.get("max_possible_ear", 0.60)))
 
-    def _summarize(self, samples, attempts):
+    def _summarize(self, samples, attempts, profile=None):
         if len(samples) < self.min_samples:
-            return None, "solo %d muestras validas; se requieren %d" % (
-                len(samples), self.min_samples)
+            detail = ""
+            if self.sample_rejections:
+                ordered = sorted(
+                    self.sample_rejections.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                detail = "; rechazos: " + ", ".join(
+                    "%s=%d" % item for item in ordered
+                )
+            return None, "solo %d muestras validas; se requieren %d%s" % (
+                len(samples), self.min_samples, detail)
         valid_ratio = len(samples) / float(max(1, attempts))
         if valid_ratio < self.min_valid_ratio:
             return None, "cobertura valida %.0f%% inferior al minimo %.0f%%" % (
                 valid_ratio * 100.0, self.min_valid_ratio * 100.0)
         summary = {"sample_count": len(samples), "attempted_samples": int(attempts),
                    "valid_sample_ratio": valid_ratio}
+        stats_samples = samples
+        if len(samples) > 10:
+            ordered = sorted(samples, key=lambda item: item["ear"])
+            if profile == "CLOSED":
+                keep = max(10, int(round(len(samples) * 0.60)))
+                stats_samples = ordered[:keep]
+            elif profile == "OPEN":
+                trim = max(1, int(round(len(samples) * 0.10)))
+                stats_samples = ordered[trim:-trim]
+            elif profile == "REDUCED":
+                trim = max(1, int(round(len(samples) * 0.20)))
+                stats_samples = ordered[trim:-trim]
+            summary["robust_sample_count"] = len(stats_samples)
         for feature in self.FEATURES:
-            values = [sample[feature] for sample in samples if feature in sample]
+            values = [sample[feature] for sample in stats_samples if feature in sample]
             if values:
                 summary[feature] = self._statistics(values)
         if "ear" not in summary:
             return None, "EAR no disponible"
+        ear_std_limit = (self.max_reduced_ear_std
+            if profile == "REDUCED" else self.max_ear_std)
+        ear_mad_limit = (self.max_reduced_ear_mad
+            if profile == "REDUCED" else self.max_ear_mad)
         for feature in ("ear", "left_ear", "right_ear"):
             stats = summary.get(feature)
             if stats is None:
                 return None, "faltan mediciones de ambos ojos"
-            if stats["robust_std"] > self.max_ear_std or stats["mad"] > self.max_ear_mad:
+            if (profile != "REDUCED"
+                    and (stats["robust_std"] > ear_std_limit
+                         or stats["mad"] > ear_mad_limit)):
                 return None, "variacion ocular excesiva en %s" % feature
         for feature in ("pitch", "yaw", "roll"):
             stats = summary.get(feature)
-            if stats is not None and stats["std"] > self.max_head_std:
+            if stats is not None and stats["robust_std"] > self.max_head_std:
                 return None, "movimiento excesivo de cabeza en %s" % feature
         left, right = summary["left_ear"]["median"], summary["right_ear"]["median"]
         asymmetry = abs(left - right) / max(1e-6, (left + right) * 0.5)
@@ -388,7 +519,7 @@ class CalibrationManager(object):
                 asymmetry * 100.0)
         summary["eye_asymmetry_ratio"] = asymmetry
         summary["quality"] = {
-            "median": float(np.median([sample["quality"] for sample in samples])),
+            "median": float(np.median([sample["quality"] for sample in stats_samples])),
             "valid_sample_ratio": valid_ratio, "eye_asymmetry_ratio": asymmetry,
         }
         return summary, None
@@ -414,30 +545,42 @@ class CalibrationManager(object):
             self.thresholds = {}
             self.message = "Etapa guardada. Falta calibrar: %s" % ", ".join(missing)
             return
-        invalid = set()
-        for feature in ("ear", "left_ear", "right_ear"):
+        features = ("ear", "left_ear", "right_ear")
+        anchors_valid = all(
+            self.profiles["OPEN"][feature]["median"]
+            - self.profiles["CLOSED"][feature]["median"]
+            >= self.min_open_closed_gap
+            for feature in features
+        )
+        if not anchors_valid:
+            values = " ".join(
+                "%s=%.3f>%.3f" % (
+                    feature,
+                    self.profiles["OPEN"][feature]["median"],
+                    self.profiles["CLOSED"][feature]["median"],
+                )
+                for feature in features
+            )
+            self.static_ready = False
+            self.thresholds = {}
+            self.last_failed_stage = "CLOSED"
+            self.profiles.pop("CLOSED", None)
+            self.message = ("Ojos abiertos y cerrados no son distinguibles "
+                            "(%s). Repita OJOS COMPLETAMENTE CERRADOS." % values)
+            return
+
+        reduced_adjusted = False
+        for feature in features:
             opened = self.profiles["OPEN"][feature]["median"]
             reduced = self.profiles["REDUCED"][feature]["median"]
             closed = self.profiles["CLOSED"][feature]["median"]
-            if opened - reduced < self.min_ear_gap:
-                invalid.update(("OPEN", "REDUCED"))
-            if reduced - closed < self.min_ear_gap:
-                invalid.update(("REDUCED", "CLOSED"))
-            if opened - closed < self.min_open_closed_gap:
-                invalid.update(("OPEN", "CLOSED"))
-        if invalid:
-            self.static_ready = False
-            self.thresholds = {}
-            self.last_failed_stage = "REDUCED" if "REDUCED" in invalid else sorted(invalid)[0]
-            # La etapa señalada deja de considerarse válida y nunca llega al
-            # perfil persistente; las demás muestras se conservan para repetir
-            # sólo la captura afectada.
-            self.profiles.pop(self.last_failed_stage, None)
-            self.message = ("Geometria no separable: debe cumplirse ABIERTO > REDUCIDO > "
-                            "CERRADO con los margenes configurados. Repita: %s" % ", ".join(
-                                self.PROFILE_LABELS[name] for name in self.STATIC_PROFILES
-                                if name in invalid))
-            return
+            if (opened - reduced < self.min_ear_gap
+                    or reduced - closed < self.min_ear_gap):
+                # La apertura parcial no es una postura repetible. Cuando los
+                # anclajes si son buenos, se obtiene una referencia personal
+                # intermedia en vez de encerrar al usuario en reintentos.
+                self.profiles["REDUCED"][feature]["median"] = (opened + closed) * 0.5
+                reduced_adjusted = True
         partials = []
         for feature in ("left_ear", "right_ear", "ear"):
             opened = self.profiles["OPEN"][feature]["median"]
@@ -468,6 +611,7 @@ class CalibrationManager(object):
             "closed_ear_reference": closed,
             "asleep_ear_reference": closed,
             "partial_closure_normalized": partials[2],
+            "reduced_reference_adjusted": bool(reduced_adjusted),
         }
         open_pitch = self.profiles["OPEN"].get("pitch")
         if open_pitch is not None:
@@ -475,7 +619,12 @@ class CalibrationManager(object):
         self.static_ready = True
         self.last_failed_stage = None
         self.result_threshold = deep_threshold
-        self.message = "Etapas estaticas validas; inicia observacion natural de parpadeos"
+        self.message = (
+            "Etapas estaticas validas; referencia reducida ajustada "
+            "automaticamente; inicia observacion natural de parpadeos"
+            if reduced_adjusted else
+            "Etapas estaticas validas; inicia observacion natural de parpadeos"
+        )
 
     def _start_dynamic(self, mode):
         self.active = True
@@ -490,6 +639,8 @@ class CalibrationManager(object):
         self.dynamic_state = "OPEN"
         self.dynamic_event = None
         self.dynamic_invalid = False
+        self.dynamic_closure = None
+        self.dynamic_max_closure = 0.0
         self.message = self._stage_message(self.active_profile)
 
     def _update_dynamic(self, metrics):
@@ -574,6 +725,7 @@ class CalibrationManager(object):
         self.capture_started = now
         self.samples = []
         self.sample_attempts = 0
+        self.sample_rejections = {}
         self.progress = 0.0
         self.dynamic_state = "OPEN"
         self.dynamic_event = None
@@ -584,17 +736,21 @@ class CalibrationManager(object):
         return False
 
     def _update_dynamic_blink(self, metrics, now):
-        sample = self._extract_sample(metrics, require_quality=True)
-        if sample is None or self._dynamic_head_moved(sample):
-            if self.dynamic_state != "OPEN":
-                self.dynamic_invalid = True
+        sample = self._extract_sample(
+            metrics, require_quality=True, allow_closed_eyes=True
+        )
+        # Un cuadro perdido o un salto aislado de pose no invalida un ciclo
+        # ocular completo; simplemente no aporta una transicion.
+        if sample is None:
             return
         closure = self._normalized_from_sample(sample)
         if closure is None:
             return
-        start_level = float(self.config.get("blink_start_closure_level", 0.35))
-        closed_level = float(self.config.get("blink_closed_closure_level", 0.75))
-        reopen_level = float(self.config.get("blink_reopen_level", 0.25))
+        self.dynamic_closure = float(closure)
+        self.dynamic_max_closure = max(self.dynamic_max_closure, float(closure))
+        start_level = float(self.config.get("blink_start_closure_level", 0.15))
+        closed_level = float(self.config.get("blink_closed_closure_level", 0.35))
+        reopen_level = float(self.config.get("blink_reopen_level", 0.15))
         if self.dynamic_state == "OPEN":
             if closure >= start_level:
                 self.dynamic_state = "CLOSING"

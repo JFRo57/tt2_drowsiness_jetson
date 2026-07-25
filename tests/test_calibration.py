@@ -195,9 +195,59 @@ class CalibrationManagerTests(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertFalse(self.manager.static_ready)
         self.assertFalse(self.manager.active)
-        self.assertIn("ABIERTO > REDUCIDO > CERRADO", self.manager.message)
+        self.assertIn("abiertos y cerrados no son distinguibles", self.manager.message)
         self.assertNotIn(result["failed_stage"], self.manager.profiles)
         self.assertEqual(result["failed_stage"], self.manager.next_required_stage())
+
+    def test_variable_reduced_stage_uses_robust_median_instead_of_retrying(self):
+        self.manager.start("REDUCED")
+        result = None
+        for ear in (0.30, 0.18, 0.28, 0.16, 0.25, 0.20, 0.29, 0.17):
+            result = self.manager.update(measured(ear)) or result
+            self.clock.advance(0.04)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["accepted"])
+        self.assertIn("REDUCED", self.manager.profiles)
+
+    def test_unstable_reduced_reference_is_adjusted_between_valid_anchors(self):
+        self.capture_stage("OPEN", measured(0.32))
+        self.capture_stage("REDUCED", measured(0.31))
+        result = self.capture_stage("CLOSED", measured(0.10))
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(self.manager.static_ready)
+        self.assertAlmostEqual(
+            0.21, self.manager.profiles["REDUCED"]["ear"]["median"]
+        )
+        self.assertTrue(
+            self.manager.thresholds["reduced_reference_adjusted"]
+        )
+
+    def test_initial_prompt_waits_without_capturing_until_confirmation(self):
+        self.manager.request_initial_calibration()
+
+        self.assertFalse(self.manager.active)
+        self.assertTrue(self.manager.awaiting_confirmation)
+        self.assertTrue(self.manager.initial_prompt)
+        self.assertEqual("FULL", self.manager.pending_confirmation_profile)
+        self.assertIsNone(self.manager.update(measured(0.32)))
+        self.assertEqual(0, self.manager.sample_attempts)
+
+        self.assertTrue(self.manager.confirm_pending_stage())
+        self.assertTrue(self.manager.active)
+        self.assertFalse(self.manager.initial_prompt)
+        self.assertEqual("OPEN", self.manager.active_profile)
+
+    def test_skip_uses_session_fallback_without_writing_profile(self):
+        self.manager.request_initial_calibration()
+        profile = self.manager.skip_calibration()
+
+        self.assertTrue(self.manager.ready_for_monitoring())
+        self.assertTrue(self.manager.skipped)
+        self.assertTrue(profile["quality"]["fallback"])
+        self.assertFalse(os.path.exists(self.manager.profile_path))
+        self.assertFalse(os.path.exists(self.manager.parameters_path))
 
     def test_preparation_delay_does_not_sample_before_stage_capture(self):
         self.manager.config["preparation_seconds"] = 0.30
@@ -218,6 +268,39 @@ class CalibrationManagerTests(unittest.TestCase):
         status = self.manager.status_metrics()
         self.assertFalse(status["calibration_preparing"])
         self.assertEqual(1, status["calibration_valid_samples"])
+
+    def test_capture_duration_starts_after_preparation(self):
+        self.manager.preparation_seconds = 2.0
+        self.manager.duration = 5.0
+        self.manager.start("OPEN")
+
+        self.clock.advance(2.0)
+        self.assertIsNone(self.manager.update(measured(0.32)))
+        self.clock.advance(2.9)
+        self.assertIsNone(self.manager.update(measured(0.32)))
+        self.assertLess(self.manager.progress, 1.0)
+
+        self.clock.advance(2.1)
+        result = self.manager.update(measured(0.32))
+        self.assertIsNotNone(result)
+
+    def test_calibration_learns_stable_camera_pose_outside_monitoring_limits(self):
+        sample = measured(0.32, pitch=55.0, yaw=48.0, roll=38.0)
+        sample.update({
+            "pose_reliable": False,
+            "eye_reliable": False,
+            "left_eye_reliable": False,
+            "right_eye_reliable": False,
+            "left_eye_width": 22.0,
+            "right_eye_width": 21.0,
+            "left_eye_sharpness": 30.0,
+            "right_eye_sharpness": 29.0,
+        })
+
+        extracted = self.manager._extract_sample(sample, require_quality=True)
+
+        self.assertIsNotNone(extracted)
+        self.assertEqual(48.0, extracted["yaw"])
 
     def test_excessive_head_motion_rejects_stage(self):
         self.manager.start("OPEN")
@@ -318,6 +401,7 @@ class PresentationCalibrationKeyTests(unittest.TestCase):
     def test_keys_use_reduced_closed_dynamic_and_full_names(self):
         selected = []
         confirmed = []
+        skipped = []
 
         class FakeApp(object):
             def start_calibration(self, profile):
@@ -327,20 +411,54 @@ class PresentationCalibrationKeyTests(unittest.TestCase):
                 confirmed.append(True)
                 return True
 
+            def skip_calibration(self):
+                skipped.append(True)
+                return True
+
         ui = PresentationUI(default_config())
         app = FakeApp()
         for key in ("o", "s", "d", "b", "c"):
             ui.handle_key(ord(key), app)
         for key in (32, 10, 13):
             ui.handle_key(key, app)
+        ui.handle_key(ord("n"), app)
 
         self.assertEqual(
             ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "FULL"], selected
         )
         self.assertEqual(3, len(confirmed))
+        self.assertEqual(1, len(skipped))
 
 
 class ApplicationCalibrationFlowTests(unittest.TestCase):
+    def test_rejected_stage_remains_visible_and_can_be_retried(self):
+        temp = tempfile.TemporaryDirectory()
+        try:
+            config = default_config()
+            config["calibration"]["profile_path"] = os.path.join(
+                temp.name, "profile.json"
+            )
+            app = DrowsinessApplication(config, simulation=True)
+            reason = "Etapa ojos abiertos invalida: solo 4 muestras validas"
+            with redirect_stdout(io.StringIO()):
+                app._handle_calibration_result({
+                    "accepted": False,
+                    "failed_stage": "OPEN",
+                    "reason": reason,
+                })
+
+            status = app.calibration.status_metrics()
+            self.assertTrue(status["calibration_active"])
+            self.assertTrue(status["calibration_waiting_confirmation"])
+            self.assertEqual("OPEN", status["calibration_failed_stage"])
+            self.assertIn(reason, status["calibration_message"])
+            with redirect_stdout(io.StringIO()):
+                self.assertTrue(app.confirm_calibration_step())
+            self.assertTrue(app.calibration.active)
+            self.assertEqual("OPEN", app.calibration.active_profile)
+        finally:
+            temp.cleanup()
+
     def test_full_sequence_waits_for_confirmation_then_starts_reduced(self):
         temp = tempfile.TemporaryDirectory()
         try:

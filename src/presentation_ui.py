@@ -163,7 +163,7 @@ class PresentationUI(object):
             "Calibrar: C Completa O Abiertos",
             "S Apertura reducida D Cerrados B Blink",
             "L Landmarks I Panel V Debug M Mute P Pausa",
-            "R Reset  Q Salir",
+            "N Omitir calibracion  R Reset  Q Salir",
         ]
         if not self.debug_overlay:
             lines = [
@@ -200,28 +200,56 @@ class PresentationUI(object):
         preparing = bool(metrics.get("calibration_preparing", False))
         waiting = bool(metrics.get("calibration_waiting_confirmation", False))
         remaining = float(metrics.get("calibration_prepare_remaining_seconds", 0.0))
-        mode = "CONFIRMAR" if waiting else ("PREPARANDO" if preparing else "CALIBRANDO")
+        failed = bool(metrics.get("calibration_failed_stage"))
+        initial_prompt = bool(metrics.get("calibration_initial_prompt", False))
+        mode = ("CALIBRACION REQUERIDA" if initial_prompt else
+                ("REPETIR" if waiting and failed else
+                ("CONFIRMAR" if waiting else
+                 ("PREPARANDO" if preparing else "CALIBRANDO"))))
         message = metrics.get("calibration_message") or "Vehiculo detenido; no mueva la cabeza"
-        if len(message) > 92:
-            message = message[:89] + "..."
+        words = message.split()
+        message_lines = [""]
+        for word in words:
+            candidate = (message_lines[-1] + " " + word).strip()
+            if len(candidate) <= 72:
+                message_lines[-1] = candidate
+            elif len(message_lines) < 2:
+                message_lines.append(word)
+            else:
+                message_lines[-1] = (message_lines[-1] + "...")[:75]
+                break
         samples = int(metrics.get("calibration_valid_samples", 0) or 0)
         attempts = int(metrics.get("calibration_sample_attempts", 0) or 0)
         width = max(120, view.shape[1] - 80)
-        cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 174), (15, 15, 15), -1)
+        cv2.rectangle(view, (25, 70), (view.shape[1] - 25, 208), (15, 15, 15), -1)
         cv2.putText(view, "%s: %s" % (mode, labels.get(target, target)), (40, 98),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
-        cv2.putText(view, message, (40, 124),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240), 1)
-        if waiting:
+        for index, line in enumerate(message_lines):
+            cv2.putText(view, line, (40, 124 + index * 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
+        if initial_prompt:
+            detail = "Click, ESPACIO o ENTER: calibrar | N: omitir y usar respaldo"
+        elif waiting:
             detail = "Click izquierdo, ESPACIO o ENTER para continuar"
         elif preparing:
             detail = "Comienza en %.1f s" % remaining
         else:
-            detail = "Muestras validas: %d / intentos: %d" % (samples, attempts)
-        cv2.putText(view, detail, (40, 148), cv2.FONT_HERSHEY_SIMPLEX,
+            rejected = metrics.get("calibration_rejection_reason", "")
+            if str(target).startswith("DYNAMIC"):
+                detail = ("Parpadeos: %d | Estado: %s | Cierre: %s | Max: %.2f" % (
+                    int(metrics.get("calibration_blink_count", 0) or 0),
+                    metrics.get("calibration_dynamic_state", "--"),
+                    PresentationUI._fmt3(metrics.get("calibration_dynamic_closure")),
+                    float(metrics.get("calibration_dynamic_max_closure", 0.0) or 0.0),
+                ))
+            else:
+                detail = "Muestras validas: %d / intentos: %d" % (samples, attempts)
+            if rejected:
+                detail += " | Rechazo: %s" % rejected
+        cv2.putText(view, detail, (40, 174), cv2.FONT_HERSHEY_SIMPLEX,
                     0.46, (220, 220, 220), 1)
-        cv2.rectangle(view, (40, 158), (40 + width, 169), (90, 90, 90), 1)
-        cv2.rectangle(view, (40, 158), (40 + int(width * progress), 169), (0, 220, 255), -1)
+        cv2.rectangle(view, (40, 188), (40 + width, 199), (90, 90, 90), 1)
+        cv2.rectangle(view, (40, 188), (40 + int(width * progress), 199), (0, 220, 255), -1)
 
     @staticmethod
     def _buzzer_label(gpio):
@@ -305,6 +333,8 @@ class PresentationUI(object):
             app.start_calibration("CLOSED")
         elif key in (ord("b"), ord("B")):
             app.start_calibration("DYNAMIC")
+        elif key in (ord("n"), ord("N")):
+            app.skip_calibration()
         elif key in (32, 10, 13):
             app.confirm_calibration_step()
         elif key in (ord("l"), ord("L")):

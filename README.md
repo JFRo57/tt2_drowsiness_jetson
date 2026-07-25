@@ -401,6 +401,7 @@ una representación alternativa y no controla los componentes.
 | `B` | Repetir observación dinámica de parpadeos |
 | Click izquierdo / `Espacio` / `Enter` | Confirmar e iniciar la siguiente etapa de calibración |
 | `C` | Reiniciar la calibración completa |
+| `N` | Omitir la calibración y usar parámetros de respaldo durante esta sesión |
 | `L` | Mostrar u ocultar landmarks |
 | `I` | Mostrar u ocultar el panel de información |
 | `V` | Activar o desactivar métricas de depuración |
@@ -410,6 +411,8 @@ una representación alternativa y no controla los componentes.
 | `Q` / `Esc` | Cerrar la aplicación |
 
 ### Calibración personalizada
+
+Si no existe un perfil válido, el sistema muestra primero `CALIBRACIÓN REQUERIDA` y no inicia la captura ni el detector de fatiga. Haz click o presiona `Espacio`/`Enter` para comenzar. Presiona `N` para omitirla durante esa sesión y usar los parámetros de respaldo; esta omisión no se guarda como perfil.
 
 Realiza la calibración con el vehículo detenido, la cámara en su posición final
 y una iluminación similar a la de uso:

@@ -200,5 +200,24 @@ class InterfaceAllocationTests(unittest.TestCase):
         self.assertIs(first, second)
 
 
+    def test_dynamic_calibration_overlay_renders_telemetry(self):
+        canvas = np.zeros((260, 640, 3), dtype=np.uint8)
+        metrics = {
+            "calibration_target": "DYNAMIC_NATURAL",
+            "calibration_progress": 0.4,
+            "calibration_waiting_confirmation": False,
+            "calibration_preparing": False,
+            "calibration_message": "Observe parpadeos naturales",
+            "calibration_blink_count": 2,
+            "calibration_dynamic_state": "CLOSING",
+            "calibration_dynamic_closure": 0.42,
+            "calibration_dynamic_max_closure": 0.73,
+        }
+
+        PresentationUI._draw_calibration_overlay(canvas, metrics)
+
+        self.assertGreater(int(canvas.sum()), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

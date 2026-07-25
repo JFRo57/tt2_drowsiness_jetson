@@ -56,6 +56,7 @@ class FaceAnalyzer(object):
         self.predictor = dlib.shape_predictor(predictor_path)
         self.tracker = None
         self.last_rect = None
+        self.calibration_profile = None
         self.frame_index = 0
         self.last_detection_source = "inicial"
         self.detection_interval = max(1, int(dcfg.get("detection_interval_frames", 12)))
@@ -192,7 +193,8 @@ class FaceAnalyzer(object):
             shape = self.predictor(gray, rect)
             raw_landmarks = shape_to_np(shape)
         except Exception:
-            self._clear_tracking("landmark_error")
+            if self.calibration_profile not in ("CLOSED", "DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY"):
+                self._clear_tracking("landmark_error")
             return self._no_face_metrics(
                 brightness,
                 total_started,
@@ -201,7 +203,8 @@ class FaceAnalyzer(object):
             )
 
         if not self._landmarks_valid(raw_landmarks, gray.shape):
-            self._clear_tracking("landmarks_invalidos")
+            if self.calibration_profile not in ("CLOSED", "DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY"):
+                self._clear_tracking("landmarks_invalidos")
             return self._no_face_metrics(
                 brightness,
                 total_started,
@@ -250,18 +253,15 @@ class FaceAnalyzer(object):
                 self.max_eye_ear_difference_ratio * max(ear_raw, 1e-6),
             ),
         )
+        # La orientacion absoluta depende de la instalacion de la camara.
+        # Aqui solo se valida que PnP haya producido una pose finita; los
+        # movimientos se miden despues contra la neutral calibrada.
         pose_reliable = bool(
-            pitch is not None
-            and yaw is not None
-            and roll is not None
-            and abs(float(pitch)) <= self.max_pose_pitch_degrees
-            and abs(float(yaw)) <= self.max_single_eye_yaw_degrees
-            and abs(float(roll)) <= self.max_pose_roll_degrees
+            pitch is not None and np.isfinite(float(pitch))
+            and yaw is not None and np.isfinite(float(yaw))
+            and roll is not None and np.isfinite(float(roll))
         )
-        common_eye_quality = bool(
-            quality >= self.eye_quality_threshold
-            and pose_reliable
-        )
+        common_eye_quality = bool(quality >= self.eye_quality_threshold)
         left_eye_reliable = bool(
             common_eye_quality
             and left_eye_width >= self.min_eye_width_pixels
@@ -274,11 +274,6 @@ class FaceAnalyzer(object):
             and right_eye_sharpness >= self.min_eye_sharpness
             and 0.03 <= right_ear <= 0.60
         )
-        if yaw is not None and abs(float(yaw)) > self.max_eye_yaw_degrees:
-            if float(yaw) > 0.0:
-                right_eye_reliable = False
-            else:
-                left_eye_reliable = False
         eye_reliable = bool(
             left_eye_reliable
             and right_eye_reliable
@@ -316,6 +311,8 @@ class FaceAnalyzer(object):
             "eye_sharpness": eye_sharpness,
             "left_eye_sharpness": left_eye_sharpness,
             "right_eye_sharpness": right_eye_sharpness,
+            "left_eye_width": left_eye_width,
+            "right_eye_width": right_eye_width,
             "eye_ear_difference": eye_ear_difference,
             "mar": mar,
             "pitch": pitch,
@@ -397,6 +394,10 @@ class FaceAnalyzer(object):
         self.last_detection_source = self.face_detector.last_source
 
         if not rects:
+            if previous is not None and self.calibration_profile in ("CLOSED", "DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY"):
+                self.last_rect = previous
+                self.last_detection_source += "_bloqueo_calibracion_cerrada"
+                return previous
             if previous is not None and self.redetection_miss_count < self.redetection_miss_tolerance:
                 self.redetection_miss_count += 1
                 self.last_rect = previous
@@ -437,6 +438,9 @@ class FaceAnalyzer(object):
         self.ear_history.clear()
         self.redetection_miss_count = 0
         self.last_detection_source = source
+
+    def set_calibration_profile(self, profile):
+        self.calibration_profile = str(profile or "").upper() or None
 
     def reset_eye_filter(self):
         """Evita mezclar muestras EAR entre dos perfiles de calibracion."""

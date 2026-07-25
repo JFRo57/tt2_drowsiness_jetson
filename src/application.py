@@ -25,7 +25,7 @@ def default_config():
         "performance": {"target_analysis_fps": 20.0, "frame_wait_timeout_seconds": 0.1, "opencv_threads": 2, "opencv_optimized": True},
         "stability": {"landmark_shape_alpha": 0.30, "landmark_translation_alpha": 0.75, "tracking_rect_alpha": 0.35, "redetection_rect_alpha": 0.30, "redetection_min_iou": 0.15, "redetection_max_center_shift": 0.45, "redetection_miss_tolerance": 2, "ear_median_window": 3, "ear_hysteresis": 0.012, "close_confirm_seconds": 0.08, "open_confirm_seconds": 0.15, "unreliable_hold_seconds": 0.25, "face_loss_hold_seconds": 0.25, "eye_quality_threshold": 0.25, "min_eye_width_pixels": 10.0, "min_eye_sharpness": 12.0, "max_eye_ear_difference": 0.12, "max_eye_ear_difference_ratio": 0.65, "max_eye_yaw_degrees": 32.0},
         "fatigue": {"ear_threshold": 0.22, "use_session_calibration": True, "blink_min_seconds": 0.08, "blink_max_seconds": 0.70, "prealert_closed_seconds": 0.45, "alert_closed_seconds": 0.85, "critical_closed_seconds": 1.6, "recovery_seconds": 1.0, "perclos_window_seconds": 60, "perclos_warning_threshold": 0.25, "perclos_alert_threshold": 0.35, "mar_threshold": 0.65, "yawn_min_seconds": 1.0, "head_nod_pitch_threshold": 18.0, "head_nod_min_seconds": 0.8, "gaze_away_warning_seconds": 2.0, "no_face_warning_seconds": 2.0},
-        "calibration": {"duration_seconds": 5.0, "min_samples": 30, "quality_threshold": 0.30, "min_ear_gap": 0.020, "max_ear_std": 0.035, "max_ear_mad": 0.025, "max_profile_overlap_ratio": 0.65, "max_profile_distance": 4.0, "profile_min_confidence": 0.35, "profile_warning_seconds": 0.8, "feature_scales": {"ear": 0.04, "mar": 0.15, "pitch": 12.0, "yaw": 15.0, "roll": 15.0}},
+        "calibration": {"duration_seconds": 5.0, "min_samples": 30, "quality_threshold": 0.30, "min_ear_gap": 0.020, "max_ear_std": 0.035, "max_ear_mad": 0.025, "max_reduced_ear_std": 0.055, "max_reduced_ear_mad": 0.040, "max_profile_overlap_ratio": 0.65, "max_profile_distance": 4.0, "profile_min_confidence": 0.35, "profile_warning_seconds": 0.8, "feature_scales": {"ear": 0.04, "mar": 0.15, "pitch": 12.0, "yaw": 15.0, "roll": 15.0}},
         "gpio": {"enabled": False, "simulation_mode": True, "numbering": "BOARD", "output_refresh_seconds": 0.5},
         "buzzer": {"enabled": True, "type": "pwm_native", "board_pin": 33, "active_high": False, "muted": False, "idle_frequency": 3000, "pwm_duty_cycle": 50, "pwm_chip": 0, "pwm_channel": 2, "min_frequency": 2000, "max_frequency": 5000},
         "leds": {"enabled": True, "active_high": True, "green_board_pin": 29, "yellow_board_pin": 31, "red_board_pin": 32},
@@ -88,8 +88,8 @@ def default_config():
         "voluntary_blink_observation_seconds": 60.0,
         "min_natural_blinks": 3, "min_voluntary_blinks": 5,
         "calibration_blink_max_seconds": 1.2, "blink_min_seconds": 0.08,
-        "blink_start_closure_level": 0.35,
-        "blink_closed_closure_level": 0.75, "blink_reopen_level": 0.25,
+        "blink_start_closure_level": 0.15,
+        "blink_closed_closure_level": 0.35, "blink_reopen_level": 0.15,
         "max_dynamic_head_delta_degrees": 12.0,
     })
     config["alerts"] = {
@@ -167,14 +167,33 @@ class DrowsinessApplication(object):
         self.detector.reset(clear_history=True)
         if self.face is not None:
             self.face.reset_eye_filter()
-        self.calibration.start(profile)
+        try:
+            self.calibration.start(profile)
+            if self.face is not None:
+                self.face.set_calibration_profile(self.calibration.active_profile)
+        except ValueError as exc:
+            self.calibration.message = str(exc)
+            print("CALIBRACION:", self.calibration.message)
+            return False
         print("CALIBRACION:", self.calibration.message)
+        return True
 
     def confirm_calibration_step(self):
         if not self.calibration.confirm_pending_stage():
             return False
         if self.face is not None:
             self.face.reset_eye_filter()
+            self.face.set_calibration_profile(self.calibration.active_profile)
+        print("CALIBRACION:", self.calibration.message)
+        return True
+
+    def skip_calibration(self):
+        profile = self.calibration.skip_calibration()
+        if self.face is not None:
+            self.face.reset_eye_filter()
+            self.face.set_calibration_profile(None)
+        self.detector.reset(clear_history=True)
+        self.detector.apply_calibration(profile)
         print("CALIBRACION:", self.calibration.message)
         return True
 
@@ -194,7 +213,10 @@ class DrowsinessApplication(object):
             if (not self.calibration.ready_for_monitoring()
                     and self.config.get("calibration", {}).get(
                         "auto_start_if_missing", True)):
-                self.start_calibration("FULL")
+                self.calibration.request_initial_calibration()
+                self.detector.state = "CALIBRACION"
+                self.detector.reason = self.calibration.message
+                print("CALIBRACION:", self.calibration.message)
             self._loop()
         except Exception as exc:
             exit_code = 1
@@ -233,6 +255,12 @@ class DrowsinessApplication(object):
 
         while not self.shutdown.requested:
             self.mode.update_from_switch(self.gpio)
+            # OpenCV solo entrega teclado y raton cuando se bombea su cola de
+            # eventos. Debe hacerse en cada vuelta, aunque no llegue un cuadro
+            # o el analisis se omita para respetar el FPS objetivo.
+            self._process_ui_events()
+            if self.shutdown.requested:
+                break
             # El estado del detector es la fuente de verdad para las salidas.
             # Mantener los patrones activos aunque la camara tarde o pierda cuadros.
             self.alerts.update(
@@ -251,13 +279,19 @@ class DrowsinessApplication(object):
                     "face_detected": False,
                     "quality": 0.0,
                 }
-                state, reason = self.detector.update(
-                    missing_metrics,
-                    self.mode.mode,
-                    monitoring_enabled=self.calibration.ready_for_monitoring(),
-                    analysis_fps=self.analysis_fps,
-                    camera_error=self.camera.error,
-                )
+                if self.calibration.ready_for_monitoring():
+                    state, reason = self.detector.update(
+                        missing_metrics,
+                        self.mode.mode,
+                        monitoring_enabled=True,
+                        analysis_fps=self.analysis_fps,
+                        camera_error=self.camera.error,
+                    )
+                else:
+                    self.detector.previous_state = self.detector.state
+                    self.detector.state = "CALIBRACION"
+                    self.detector.reason = self.calibration.message
+                    state, reason = self.detector.state, self.detector.reason
                 if self.calibration.active:
                     self._handle_calibration_result(
                         self.calibration.update(missing_metrics)
@@ -373,15 +407,20 @@ class DrowsinessApplication(object):
             if was_calibrating and not self.calibration.active:
                 self.detector.events.reset(clear_history=True)
 
-            state, reason = self.detector.update(
-                metrics,
-                self.mode.mode,
-                monitoring_enabled=self.calibration.ready_for_monitoring(),
-                analysis_fps=self.analysis_fps,
-            )
-            if state == "CALIBRACION":
+            if self.calibration.ready_for_monitoring():
+                state, reason = self.detector.update(
+                    metrics,
+                    self.mode.mode,
+                    monitoring_enabled=True,
+                    analysis_fps=self.analysis_fps,
+                )
+            else:
+                # Calibracion y deteccion son flujos excluyentes: no se
+                # actualizan vision, eventos, PERCLOS ni decisiones de fatiga.
+                self.detector.previous_state = self.detector.state
+                self.detector.state = "CALIBRACION"
                 self.detector.reason = self.calibration.message
-                reason = self.detector.reason
+                state, reason = self.detector.state, self.detector.reason
 
             self.analysis_ms = (time.monotonic() - analysis_started) * 1000.0
             metrics["runtime_seconds"] = time.monotonic() - self.started_at
@@ -419,6 +458,16 @@ class DrowsinessApplication(object):
             self.detector.apply_calibration(result)
             return
         if not result.get("accepted"):
+            failed_stage = result.get("failed_stage")
+            if failed_stage:
+                self.calibration.last_failed_stage = failed_stage
+            if (failed_stage and self.config.get("calibration", {}).get(
+                    "require_stage_confirmation", False)):
+                retry_message = "%s Presione ESPACIO, ENTER o haga click para repetir." % (
+                    result.get("reason") or "Etapa invalida.",
+                )
+                self.calibration.await_next_stage(failed_stage, retry_message)
+                print("CALIBRACION:", self.calibration.message)
             return
         next_stage = result.get("next_stage") or self.calibration.next_required_stage()
         if next_stage is not None and not self.calibration.active:
@@ -457,9 +506,15 @@ class DrowsinessApplication(object):
                 self.analysis_fps,
                 self.hardware_mode(),
             )
-        key = cv2.waitKey(1) & 0xFF
-        if key != 255:
-            self.ui.handle_key(key, self)
+    def _process_ui_events(self):
+        if not self.ui:
+            return
+        key = cv2.waitKeyEx(1)
+        if key >= 0:
+            # Las teclas de texto estan en el byte bajo tanto con waitKey
+            # como con waitKeyEx. Este ultimo conserva mejor los eventos en
+            # algunos backends de OpenCV usados por Jetson.
+            self.ui.handle_key(key & 0xFF, self)
         if self.ui.consume_click():
             self.confirm_calibration_step()
         if self.ui.is_closed():
