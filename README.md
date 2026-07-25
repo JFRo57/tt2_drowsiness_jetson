@@ -296,10 +296,12 @@ sonando. Por ello no debe utilizarse sobre BOARD 33 con este buzzer.
 
 ## ▶️ Ejecución
 
-Activa siempre el entorno virtual independiente de esta versión:
+Activa siempre el entorno virtual desde el checkout real donde tengas la rama
+`v4`. En esta Jetson el repositorio ya existe en la carpeta histórica `v3`; la
+rama cambió, pero Git no renombra el directorio:
 
 ```bash
-cd /home/rafael/Documentos/tt2_drowsiness_jetson_v4
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
 source .venv/bin/activate
 ```
 

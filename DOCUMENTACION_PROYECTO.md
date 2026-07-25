@@ -405,10 +405,12 @@ Nota importante: `requirements.txt` esta vacio actualmente. Eso significa que la
 
 ### Preparar el entorno
 
-Desde la carpeta del proyecto:
+Desde el checkout real del proyecto. En esta Jetson la rama `v4` está dentro de
+la carpeta histórica `tt2_drowsiness_jetson_v3`; cambiar de rama no renombra el
+directorio local:
 
 ```bash
-cd /home/rafael/Documentos/tt2_drowsiness_jetson_v4
+cd /home/rafael/Documentos/tt2_drowsiness_jetson_v3
 source .venv/bin/activate
 ```
 
