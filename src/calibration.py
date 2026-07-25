@@ -62,6 +62,9 @@ class CalibrationManager(object):
             self.config.get("max_partial_eye_difference", 0.25)
         )
         self.profile_path = self.config.get("profile_path", "calibration_profile.json")
+        self.parameters_path = self.config.get(
+            "parameters_path", "calibration_parameters.json"
+        )
 
         self.active = False
         self.active_profile = None
@@ -309,6 +312,8 @@ class CalibrationManager(object):
             "calibrated_ear_threshold": self.thresholds.get("ear_threshold"),
             "calibrated_ear_open_threshold": self.thresholds.get("ear_open_threshold"),
             "reduced_ear_threshold": self.thresholds.get("reduced_ear_threshold"),
+            "calibration_profile_path": self.profile_path,
+            "calibration_parameters_path": self.parameters_path,
             "calibration_format_version": (self.profile_data.get("format_version")
                 if self.profile_data else None),
         }
@@ -710,7 +715,9 @@ class CalibrationManager(object):
             "neutral_head_pose": neutral, "quality": quality,
             "thresholds": dict(self.thresholds), "stages": dict(self.profiles),
         }
-        saved = self._save_profile(profile)
+        parameter_export = self._parameter_export(profile)
+        saved_profile = self._save_profile(profile)
+        saved_parameters = self._save_parameters(parameter_export)
         self.profile_data = profile
         self.model_ready = True
         self.pending_recalibration = False
@@ -718,14 +725,55 @@ class CalibrationManager(object):
         self.active_profile = None
         self.dynamic_mode = None
         self.last_failed_stage = None
-        self.message = ("Calibracion completa y perfil guardado" if saved
-                        else "Calibracion completa; no se pudo guardar el perfil")
+        saved = bool(saved_profile and saved_parameters)
+        if saved:
+            self.message = "Calibracion completa; perfil y parametros guardados"
+        elif saved_profile:
+            self.message = "Calibracion completa; perfil guardado, parametros no guardados"
+        elif saved_parameters:
+            self.message = "Calibracion completa; parametros guardados, perfil no guardado"
+        else:
+            self.message = "Calibracion completa; no se pudo guardar el perfil"
         result = {"accepted": True, "profile": "COMPLETE", "profile_data": profile,
                   "profiles": dict(self.profiles), "thresholds": dict(self.thresholds),
                   "static_ready": True, "model_ready": True,
-                  "profile_saved": saved, "reason": self.message}
+                  "profile_saved": saved_profile,
+                  "parameters_saved": saved_parameters,
+                  "parameters_path": self.parameters_path,
+                  "reason": self.message}
         self.last_result = result
         return result
+
+    def _parameter_export(self, profile):
+        keys = (
+            "duration_seconds", "preparation_seconds",
+            "require_stage_confirmation", "min_samples",
+            "min_valid_sample_ratio", "min_ear_gap", "min_open_closed_gap",
+            "natural_blink_observation_seconds",
+            "voluntary_blink_observation_seconds", "min_natural_blinks",
+            "min_voluntary_blinks", "calibration_blink_max_seconds",
+        )
+        calibration_settings = {}
+        for key in keys:
+            if key in self.config:
+                calibration_settings[key] = self.config[key]
+        return {
+            "format_version": self.FORMAT_VERSION,
+            "kind": "tt2_calibration_parameters",
+            "profile_path": self.profile_path,
+            "calibrated_at": profile.get("calibrated_at"),
+            "eyes": profile.get("eyes", {}),
+            "partial_closure_normalized": profile.get(
+                "partial_closure_normalized"
+            ),
+            "blink_baseline": profile.get("blink_baseline", {}),
+            "neutral_head_pose": profile.get("neutral_head_pose", {}),
+            "quality": profile.get("quality", {}),
+            "thresholds": profile.get("thresholds", {}),
+            "calibration_settings": calibration_settings,
+            "fatigue_settings": dict(self.full_config.get("fatigue", {})),
+            "profile_data": profile,
+        }
 
     @staticmethod
     def _blink_statistics(events, source):
@@ -747,13 +795,19 @@ class CalibrationManager(object):
         }
 
     def _save_profile(self, profile):
-        path = os.path.abspath(self.profile_path)
+        return self._save_json_atomic(self.profile_path, profile)
+
+    def _save_parameters(self, parameters):
+        return self._save_json_atomic(self.parameters_path, parameters)
+
+    def _save_json_atomic(self, path, payload):
+        path = os.path.abspath(path)
         directory, temporary = os.path.dirname(path), path + ".tmp"
         try:
             if directory and not os.path.isdir(directory):
                 os.makedirs(directory)
             with open(temporary, "w") as handle:
-                json.dump(profile, handle, indent=2, sort_keys=True)
+                json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
@@ -768,25 +822,39 @@ class CalibrationManager(object):
             return False
 
     def _load_profile(self):
-        path = os.path.abspath(self.profile_path)
-        if not os.path.exists(path):
-            return
-        try:
-            with open(path, "r") as handle:
-                loaded = json.load(handle)
-            migrated = self._migrate_profile(loaded)
-            if not self._profile_valid(migrated):
-                self.message = "Perfil existente invalido; se requiere recalibracion"
+        errors = []
+        for path, from_parameters in (
+            (self.profile_path, False),
+            (self.parameters_path, True),
+        ):
+            absolute = os.path.abspath(path)
+            if not os.path.exists(absolute):
+                continue
+            try:
+                with open(absolute, "r") as handle:
+                    loaded = json.load(handle)
+                if from_parameters:
+                    loaded = loaded.get("profile_data", loaded)
+                migrated = self._migrate_profile(loaded)
+                if not self._profile_valid(migrated):
+                    errors.append("perfil invalido en %s" % path)
+                    continue
+                self._apply_loaded_profile(migrated, from_parameters)
                 return
-            self.profile_data = migrated
-            self.profiles = dict(migrated.get("stages", {}))
-            self.thresholds = dict(migrated.get("thresholds", {}))
-            self.static_ready = True
-            self.model_ready = True
-            self.pending_recalibration = False
-            self.message = "Perfil de calibracion cargado"
-        except Exception as exc:
-            self.message = "No se pudo cargar el perfil: %s" % exc
+            except Exception as exc:
+                errors.append("%s: %s" % (path, exc))
+        if errors:
+            self.message = "No se pudo cargar perfil persistente: %s" % "; ".join(errors)
+
+    def _apply_loaded_profile(self, profile, from_parameters):
+        self.profile_data = profile
+        self.profiles = dict(profile.get("stages", {}))
+        self.thresholds = dict(profile.get("thresholds", {}))
+        self.static_ready = True
+        self.model_ready = True
+        self.pending_recalibration = False
+        self.message = ("Parametros de calibracion cargados" if from_parameters
+                        else "Perfil de calibracion cargado")
 
     def _migrate_profile(self, profile):
         if int(profile.get("format_version", 1)) >= self.FORMAT_VERSION:

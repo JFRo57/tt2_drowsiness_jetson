@@ -50,6 +50,7 @@ class CalibrationManagerTests(unittest.TestCase):
         calibration = self.config["calibration"]
         calibration.update({
             "profile_path": os.path.join(self.temp.name, "profile.json"),
+            "parameters_path": os.path.join(self.temp.name, "parameters.json"),
             "duration_seconds": 0.20,
             "preparation_seconds": 0.0,
             "require_stage_confirmation": False,
@@ -119,6 +120,7 @@ class CalibrationManagerTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result["model_ready"])
         self.assertTrue(result["profile_saved"])
+        self.assertTrue(result["parameters_saved"])
         self.assertTrue(self.manager.ready_for_monitoring())
         selected = result["profile_data"]["blink_baseline"]["selected"]
         self.assertEqual(2, selected["event_count"])
@@ -126,6 +128,39 @@ class CalibrationManagerTests(unittest.TestCase):
         self.assertIsNotNone(selected["p75_seconds"])
         self.assertIsNotNone(selected["p90_seconds"])
         self.assertFalse(os.path.exists(self.manager.profile_path + ".tmp"))
+        self.assertFalse(os.path.exists(self.manager.parameters_path + ".tmp"))
+        with open(self.manager.parameters_path, "r") as handle:
+            parameters = json.load(handle)
+        self.assertEqual("tt2_calibration_parameters", parameters["kind"])
+        self.assertEqual(2, parameters["format_version"])
+        self.assertIn("eyes", parameters)
+        self.assertIn("thresholds", parameters)
+        self.assertIn("profile_data", parameters)
+        self.assertEqual(
+            self.config["calibration"]["natural_blink_observation_seconds"],
+            parameters["calibration_settings"]["natural_blink_observation_seconds"],
+        )
+
+    def test_parameter_export_recovers_profile_when_main_file_is_missing(self):
+        self.capture_static()
+        self.complete_dynamic()
+        os.unlink(self.manager.profile_path)
+
+        reloaded = CalibrationManager(self.config, clock=self.clock)
+
+        self.assertTrue(reloaded.ready_for_monitoring())
+        self.assertEqual("Parametros de calibracion cargados", reloaded.message)
+        self.assertAlmostEqual(0.16, reloaded.thresholds["ear_threshold"])
+
+    def test_application_reuses_persistent_calibration_without_repeating(self):
+        self.capture_static()
+        self.complete_dynamic()
+
+        app = DrowsinessApplication(self.config, simulation=True)
+
+        self.assertTrue(app.calibration.ready_for_monitoring())
+        self.assertIsNotNone(app.detector.profile)
+        self.assertAlmostEqual(0.16, app.detector.ear_threshold)
 
     def test_normalized_closure_is_personal_and_clamped(self):
         self.capture_static()

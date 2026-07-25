@@ -22,6 +22,8 @@ dist/
 # Runtime output
 logs/
 *.log
+calibration_profile.json
+calibration_parameters.json
 
 # Local secrets and environment overrides
 .env
@@ -47,4 +49,3 @@ Thumbs.db
 # Patch and temporary files
 *.orig
 *.rej
-

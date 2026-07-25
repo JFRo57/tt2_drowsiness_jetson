@@ -584,8 +584,12 @@ dlib no cambia ni se reentrena durante este proceso: extrae los landmarks. El
 cierre de cada ojo se calcula como `(EAR_abierto - EAR_actual) /
 (EAR_abierto - EAR_cerrado)` y se limita a `[0,1]`; la etapa reducida valida y
 personaliza la zona intermedia. El perfil versión 2 guarda ojos, basal de
-parpadeo, pose neutral, calidad y fecha en `calibration_profile.json`. La
-escritura es atómica y un intento fallido nunca sobrescribe el perfil previo.
+parpadeo, pose neutral, calidad y fecha en `calibration_profile.json`. También
+se guarda `calibration_parameters.json` con umbrales, referencias oculares,
+basal de parpadeo, postura neutral y una copia de respaldo del perfil. En el
+siguiente arranque se cargan automáticamente si son válidos; si falta el perfil
+principal, el archivo de parámetros puede recuperar la calibración. La escritura
+es atómica y un intento fallido nunca sobrescribe el perfil previo.
 
 Si falla una captura, revisar el encuadre, la iluminacion y la calidad del
 rostro antes de repetir el perfil.
@@ -722,6 +726,7 @@ Valores predeterminados:
 | `min_natural_blinks` | `3` | Eventos naturales mínimos |
 | `min_voluntary_blinks` | `5` | Respaldo voluntario mínimo |
 | `profile_path` | `calibration_profile.json` | Perfil versionado persistente |
+| `parameters_path` | `calibration_parameters.json` | Export persistente de parámetros y respaldo |
 
 Las estadísticas centrales usan medianas, MAD y percentiles para que unos
 pocos cuadros atípicos no definan el perfil.

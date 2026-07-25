@@ -78,6 +78,7 @@ def default_config():
     }
     config["calibration"].update({
         "profile_path": "calibration_profile.json", "auto_start_if_missing": True,
+        "parameters_path": "calibration_parameters.json",
         "preparation_seconds": 2.0, "require_stage_confirmation": True,
         "min_valid_sample_ratio": 0.65, "min_open_closed_gap": 0.06,
         "max_head_angle_std_degrees": 6.0,

@@ -454,8 +454,10 @@ origen. Debe repetirse si cambia el conductor, la cámara o los lentes.
 **dlib no se reentrena:** continúa extrayendo los 68 landmarks. El cierre se
 normaliza por ojo como `(EAR_abierto - EAR_actual) / (EAR_abierto -
 EAR_cerrado)`, limitado a `[0,1]`. El perfil se guarda atómicamente en
-`calibration_profile.json` y se reutiliza sólo si su versión y calidad son
-compatibles.
+`calibration_profile.json`; además se exportan los parámetros operativos a
+`calibration_parameters.json`. En el siguiente arranque se reutilizan si su
+versión y calidad son compatibles, sin repetir la calibración. Ambos archivos
+son locales y no se versionan en Git.
 
 ---
 
