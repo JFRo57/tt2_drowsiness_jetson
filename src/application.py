@@ -14,6 +14,7 @@ from .gpio_controller import GPIOController
 from .mode_controller import ModeController
 from .presentation_ui import PresentationUI
 from .shutdown_manager import ShutdownManager
+from .state_machine_ui import StateMachineUI
 
 
 def default_config():
@@ -30,8 +31,8 @@ def default_config():
         "buzzer": {"enabled": True, "type": "pwm_native", "board_pin": 33, "active_high": False, "muted": False, "idle_frequency": 3000, "pwm_duty_cycle": 50, "pwm_chip": 0, "pwm_channel": 2, "min_frequency": 2000, "max_frequency": 5000},
         "leds": {"enabled": True, "active_high": True, "green_board_pin": 29, "yellow_board_pin": 31, "red_board_pin": 32},
         "switch": {"enabled": False, "topology": "on_off_on", "auto_board_pin": 35, "emergency_board_pin": 37, "center_mode": "MAINTENANCE", "active_low": True, "debounce_ms": 100},
-        "interface": {"presentation_enabled": True, "show_landmarks": True, "show_information_panel": True, "show_virtual_leds": True, "close_action": "FULL_SHUTDOWN"},
-        "logging": {"enabled": False, "events_only": True, "path": "logs/events.csv", "save_images": False, "record_video": False},
+        "interface": {"presentation_enabled": True, "state_machine_enabled": False, "show_landmarks": True, "show_information_panel": True, "show_virtual_leds": True, "close_action": "FULL_SHUTDOWN"},
+        "logging": {"enabled": True, "events_only": False, "path": "logs/events.csv", "diagnostic_interval_seconds": 0.5, "save_images": False, "record_video": False},
     }
     config["stability"].update({"max_single_eye_yaw_degrees": 42.0})
     config["fatigue"].update({
@@ -140,6 +141,7 @@ class DrowsinessApplication(object):
             self.detector.apply_calibration(self.calibration.profile_data)
         self.logger = EventLogger(config)
         self.ui = PresentationUI(config) if config["interface"].get("presentation_enabled", True) else None
+        self.state_machine_ui = StateMachineUI(config)
         self.face = None
         self.analysis_fps = 0.0
         self.analysis_ms = 0.0
@@ -210,6 +212,7 @@ class DrowsinessApplication(object):
                 raise RuntimeError(self.camera.error or "No se pudo iniciar la camara")
             if self.ui:
                 self.ui.create()
+            self.state_machine_ui.create()
             if (not self.calibration.ready_for_monitoring()
                     and self.config.get("calibration", {}).get(
                         "auto_start_if_missing", True)):
@@ -428,6 +431,7 @@ class DrowsinessApplication(object):
             self.alerts.update(
                 state, self.mode.mode, self._vision_state()
             )
+            metrics["strong_since"] = self.detector.strong_since
             metrics["active_alert"] = self.alerts.active_alert
             self.logger.log_transition(
                 self.mode.mode,
@@ -496,6 +500,7 @@ class DrowsinessApplication(object):
                 time.monotonic() - self.started_at,
             )
             rendered_metrics.setdefault("analysis_ms", self.analysis_ms)
+            rendered_metrics["runtime_monotonic"] = time.monotonic()
             self.ui.draw(
                 frame,
                 rendered_metrics,
@@ -506,6 +511,7 @@ class DrowsinessApplication(object):
                 self.analysis_fps,
                 self.hardware_mode(),
             )
+            self.state_machine_ui.draw(rendered_metrics, self.detector)
     def _process_ui_events(self):
         if not self.ui:
             return
@@ -519,6 +525,8 @@ class DrowsinessApplication(object):
             self.confirm_calibration_step()
         if self.ui.is_closed():
             self.shutdown.request("Ventana cerrada")
+        if self.state_machine_ui.is_closed():
+            self.state_machine_ui.disable()
 
     def hardware_mode(self):
         return "GPIO simulado" if self.gpio.simulation_mode else "GPIO fisico"

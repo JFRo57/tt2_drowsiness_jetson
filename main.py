@@ -22,6 +22,7 @@ def parse_args():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--presentation", action="store_true", help="Mostrar interfaz OpenCV de presentacion")
     mode.add_argument("--headless", action="store_true", help="Ejecutar sin interfaz")
+    parser.add_argument("--state_machine", action="store_true", help="Mostrar otra ventana con la maquina de estados en tiempo real")
     parser.add_argument("--simulation", action="store_true", help="Forzar GPIO, buzzer, LEDs y switch simulados")
     parser.add_argument("--gpio-self-test", action="store_true", help="Probar LEDs y buzzer fisicos sin camara ni interfaz")
     parser.add_argument("--config", default="config.json", help="Ruta al archivo JSON de configuracion")
@@ -37,6 +38,9 @@ def main():
         cfg["interface"]["presentation_enabled"] = False
     if args.presentation:
         cfg["interface"]["presentation_enabled"] = True
+    if args.state_machine:
+        cfg["interface"]["presentation_enabled"] = True
+        cfg["interface"]["state_machine_enabled"] = True
     if args.simulation:
         cfg["gpio"]["enabled"] = False
         cfg["gpio"]["simulation_mode"] = True

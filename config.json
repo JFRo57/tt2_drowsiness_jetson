@@ -269,10 +269,11 @@
     "close_action": "FULL_SHUTDOWN"
   },
   "logging": {
-    "enabled": false,
-    "events_only": true,
+    "enabled": true,
+    "events_only": false,
     "path": "logs/events.csv",
     "snapshot_interval_seconds": 5.0,
+    "diagnostic_interval_seconds": 0.5,
     "flush_interval_seconds": 2.0,
     "save_images": false,
     "record_video": false
