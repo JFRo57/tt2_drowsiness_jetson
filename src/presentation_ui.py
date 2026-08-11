@@ -105,6 +105,11 @@ class PresentationUI(object):
                 self._fmt3(m.get("right_closure_normalized")),
             ),
             "Cierre normalizado: %s" % self._fmt3(m.get("closure_normalized")),
+            "Perfil ocular instantaneo: %s" % m.get("calibrated_profile", "--"),
+            "Cierre profundo: %s%s" % (
+                "SI" if m.get("deep_closure_active") else "NO",
+                " (tolerancia breve)" if m.get("deep_closure_dropout_active") else "",
+            ),
             "Evento ocular: %s (%s)" % (
                 m.get("eye_event_state", "--"),
                 "PARCIAL" if m.get("eye_measurement_partial")
@@ -132,6 +137,11 @@ class PresentationUI(object):
                 "OK" if m.get("perclos_reliable") else "PARCIAL",
             ),
             "MAR: %.3f  Bostezo: %s" % (m.get("mar", 0.0), "SI" if m.get("possible_yawn") else "NO"),
+            "Bostezo estado: %s %.1f s (max %.3f)" % (
+                m.get("yawn_state", "--"),
+                float(m.get("current_yawn_seconds", 0.0) or 0.0),
+                float(m.get("current_yawn_max_mar", 0.0) or 0.0),
+            ),
             "Pitch/Yaw/Roll: %s / %s / %s" % (self._fmt(m.get("pitch")), self._fmt(m.get("yaw")), self._fmt(m.get("roll"))),
             "Cabeceo posible: %s" % ("SI" if m.get("possible_nod") else "NO"),
             "Cabeceos/bostezos ventana: %d / %d" % (
@@ -161,7 +171,7 @@ class PresentationUI(object):
             "Prueba: 4 Alerta 5 Sospecha 6 Somnol.",
             "7 Critico 8 Recuperacion 0 Real",
             "Calibrar: C Completa O Abiertos",
-            "S Apertura reducida D Cerrados B Blink",
+            "S Apertura reducida D Cerrados B Blink Y Bostezo",
             "L Landmarks I Panel V Debug M Mute P Pausa",
             "N Omitir calibracion  R Reset  Q Salir",
         ]
@@ -194,6 +204,7 @@ class PresentationUI(object):
             "CLOSED": "OJOS COMPLETAMENTE CERRADOS",
             "DYNAMIC_NATURAL": "OBSERVACION NATURAL DE PARPADEOS",
             "DYNAMIC_VOLUNTARY": "PARPADEOS VOLUNTARIOS NORMALES",
+            "YAWN": "CALIBRACION PERSONAL DE BOSTEZOS",
         }
         target = metrics.get("calibration_target", "")
         progress = max(0.0, min(1.0, float(metrics.get("calibration_progress", 0.0))))
@@ -241,6 +252,13 @@ class PresentationUI(object):
                     metrics.get("calibration_dynamic_state", "--"),
                     PresentationUI._fmt3(metrics.get("calibration_dynamic_closure")),
                     float(metrics.get("calibration_dynamic_max_closure", 0.0) or 0.0),
+                ))
+            elif target == "YAWN":
+                detail = ("Bostezos completos: %d | Estado: %s | MAR: %s | Max: %.3f" % (
+                    int(metrics.get("calibration_yawn_count", 0) or 0),
+                    metrics.get("calibration_yawn_state", "--"),
+                    PresentationUI._fmt3(metrics.get("calibration_yawn_mar")),
+                    float(metrics.get("calibration_yawn_max_mar", 0.0) or 0.0),
                 ))
             else:
                 detail = "Muestras validas: %d / intentos: %d" % (samples, attempts)
@@ -333,6 +351,8 @@ class PresentationUI(object):
             app.start_calibration("CLOSED")
         elif key in (ord("b"), ord("B")):
             app.start_calibration("DYNAMIC")
+        elif key in (ord("y"), ord("Y")):
+            app.start_calibration("YAWN")
         elif key in (ord("n"), ord("N")):
             app.skip_calibration()
         elif key in (32, 10, 13):

@@ -38,6 +38,13 @@
     "opencv_config_path": "models/deploy.prototxt",
     "opencv_model_path": "models/res10_300x300_ssd_iter_140000_fp16.caffemodel"
   },
+  "fatigue_models": {
+    "enabled": true,
+    "package_path": "models/fatigue_model_package",
+    "inference_interval_frames": 2,
+    "eye_closed_threshold": 0.5,
+    "yawn_threshold": 0.5
+  },
   "preprocessing": {
     "use_clahe": true,
     "adaptive_clahe": true,
@@ -101,6 +108,9 @@
     "blink_reopen_level": 0.25,
     "blink_event_max_seconds": 4.0,
     "deep_closure_level": 0.80,
+    "deep_closure_hold_level": 0.70,
+    "deep_closure_release_level": 0.25,
+    "deep_closure_dropout_seconds": 0.20,
     "partial_closure_hysteresis": 0.05,
     "reduced_opening_sustain_seconds": 1.5,
     "sustained_closure_seconds": 0.8,
@@ -182,6 +192,12 @@
     "blink_closed_closure_level": 0.35,
     "blink_reopen_level": 0.15,
     "max_dynamic_head_delta_degrees": 12.0,
+    "yawn_calibration_seconds": 30.0,
+    "min_calibration_yawns": 2,
+    "min_calibration_yawn_seconds": 0.8,
+    "min_yawn_mar_gap": 0.15,
+    "yawn_calibration_start_gap": 0.10,
+    "yawn_calibration_return_gap": 0.06,
     "max_profile_overlap_ratio": 0.65,
     "max_profile_distance": 4.0,
     "profile_min_confidence": 0.35,
@@ -247,15 +263,15 @@
   "leds": {
     "enabled": true,
     "active_high": true,
-    "green_board_pin": 29,
-    "yellow_board_pin": 31,
-    "red_board_pin": 32
+    "green_board_pin": 11,
+    "yellow_board_pin": 13,
+    "red_board_pin": 15
   },
   "switch": {
     "enabled": false,
     "topology": "on_off_on",
-    "auto_board_pin": 35,
-    "emergency_board_pin": 37,
+    "auto_board_pin": 12,
+    "emergency_board_pin": 16,
     "center_mode": "MAINTENANCE",
     "active_low": true,
     "debounce_ms": 100

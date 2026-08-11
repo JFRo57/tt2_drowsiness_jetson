@@ -226,6 +226,7 @@ class TemporalEventEngine(object):
         self.blink_invalid = False
         self.deep_duration = 0.0
         self.deep_active = False
+        self.deep_dropout_since = None
         self.last_eye_time = None
         self.last_eye_valid = False
         self.last_deep = False
@@ -266,6 +267,7 @@ class TemporalEventEngine(object):
         self.blink_invalid = False
         self.deep_duration = 0.0
         self.deep_active = False
+        self.deep_dropout_since = None
         self.last_eye_time = None
         self.last_eye_valid = False
         self.last_deep = False
@@ -328,16 +330,18 @@ class TemporalEventEngine(object):
         )
         closure = signals.get("closure_normalized")
         deep_threshold = float(self.config.get("deep_closure_level", 0.80))
+        deep_hold = float(self.config.get("deep_closure_hold_level", 0.70))
+        active_threshold = deep_hold if self.deep_active else deep_threshold
         deep = bool(
             valid_for_perclos
             and closure is not None
-            and float(closure) >= deep_threshold
+            and float(closure) >= active_threshold
         )
         self.perclos_window.update(
             now, True, valid_for_perclos, deep
         )
 
-        self._update_deep_closure(now, valid_for_perclos, deep)
+        self._update_deep_closure(now, valid_for_perclos, deep, closure)
         self._update_eye_cycle(now, signals, valid_for_perclos)
         self._update_reduced_opening(now, closure, valid_for_perclos)
 
@@ -351,31 +355,49 @@ class TemporalEventEngine(object):
         self._prune_events(now)
         return self.snapshot(now)
 
-    def _update_deep_closure(self, now, valid, deep):
+    def _update_deep_closure(self, now, valid, deep, closure=None):
+        # Una lectura aislada no debe borrar un cierre ya confirmado. Durante
+        # la gracia el contador se pausa: no inventa tiempo cerrado ni lo pierde.
         if self.last_eye_time is not None and self.last_eye_valid and self.last_deep:
             self.deep_duration += max(0.0, now - self.last_eye_time)
         if valid:
             self.eye_invalid_since = None
-            if not deep:
-                if self.deep_duration >= float(
-                    self.config.get("severe_closure_seconds", 1.2)
-                ):
-                    self.severe_closures.append((now, self.deep_duration))
-                    self.new_events.append("CIERRE_GRAVE")
-                self.deep_duration = 0.0
-            self.deep_active = bool(deep)
+            if deep:
+                self.deep_dropout_since = None
+                self.deep_active = True
+            elif self.deep_active:
+                release = float(self.config.get("deep_closure_release_level", 0.25))
+                if closure is not None and float(closure) <= release:
+                    self._finish_deep_closure(now)
+                elif self.deep_dropout_since is None:
+                    self.deep_dropout_since = now
+                if self.deep_active:
+                    grace = float(self.config.get("deep_closure_dropout_seconds", 0.20))
+                    if now - self.deep_dropout_since > grace:
+                        self._finish_deep_closure(now)
+            else:
+                self.deep_dropout_since = None
         else:
             if self.eye_invalid_since is None:
                 self.eye_invalid_since = now
-            self.deep_active = False
             reset_after = float(
                 self.config.get("unreliable_event_abort_seconds", 0.40)
             )
             if now - self.eye_invalid_since >= reset_after:
-                self.deep_duration = 0.0
+                self._finish_deep_closure(now)
         self.last_eye_time = now
         self.last_eye_valid = bool(valid)
-        self.last_deep = bool(deep)
+        self.last_deep = bool(valid and deep)
+
+    def _finish_deep_closure(self, now):
+        if self.deep_duration >= float(
+            self.config.get("severe_closure_seconds", 1.2)
+        ):
+            self.severe_closures.append((now, self.deep_duration))
+            self.new_events.append("CIERRE_GRAVE")
+        self.deep_duration = 0.0
+        self.deep_active = False
+        self.deep_dropout_since = None
 
     def _update_eye_cycle(self, now, signals, valid):
         closure = signals.get("closure_normalized")
@@ -824,6 +846,13 @@ class TemporalEventEngine(object):
             "eye_event_state": self.eye_state,
             "current_closure_seconds": self.deep_duration,
             "deep_closure_active": self.deep_active,
+            "deep_closure_dropout_active": bool(
+                self.deep_active and self.deep_dropout_since is not None
+            ),
+            "deep_closure_dropout_seconds": (
+                max(0.0, now - self.deep_dropout_since)
+                if self.deep_dropout_since is not None else 0.0
+            ),
             "reduced_opening_seconds": self.reduced_duration,
             "blink_count_recent": len(self.blinks),
             "last_blink_seconds": (
@@ -838,6 +867,15 @@ class TemporalEventEngine(object):
             ),
             "prolonged_blinks_recent": prolonged_count,
             "yawn_state": self.yawn_state,
+            "current_yawn_seconds": (
+                max(0.0, now - self.yawn_started_at)
+                if self.yawn_started_at is not None else 0.0
+            ),
+            "current_yawn_sustained_seconds": (
+                self.yawn_sustained + max(0.0, now - self.yawn_wide_since)
+                if self.yawn_wide_since is not None else self.yawn_sustained
+            ),
+            "current_yawn_max_mar": self.yawn_max_mar,
             "recent_yawns": yawn_count,
             "nod_state": self.nod_state,
             "recent_nods": nod_count,

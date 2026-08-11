@@ -8,6 +8,7 @@ import dlib
 import numpy as np
 
 from .face_detector import FaceDetectorBackend
+from .fatigue_models import FatigueModelPackage
 
 
 LEFT_EYE = list(range(42, 48))
@@ -53,6 +54,7 @@ class FaceAnalyzer(object):
             raise RuntimeError("Predictor facial no encontrado: %s" % predictor_path)
 
         self.face_detector = FaceDetectorBackend(config)
+        self.fatigue_models = FatigueModelPackage(config)
         self.predictor = dlib.shape_predictor(predictor_path)
         self.tracker = None
         self.last_rect = None
@@ -326,6 +328,7 @@ class FaceAnalyzer(object):
             "analysis_breakdown_ms": timing,
         }
         metrics.update(self.face_detector.status())
+        metrics.update(self.fatigue_models.analyze(frame, raw_landmarks, metrics["rect"]))
         return metrics
 
     def _no_face_metrics(self, brightness, started, preprocess_done, locate_done):
@@ -345,6 +348,7 @@ class FaceAnalyzer(object):
             "analysis_breakdown_ms": timing,
         }
         metrics.update(self.face_detector.status())
+        metrics.update(self.fatigue_models.status())
         return metrics
 
     @staticmethod

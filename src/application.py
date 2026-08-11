@@ -41,6 +41,9 @@ def default_config():
         "blink_start_closure_level": 0.35,
         "blink_closed_closure_level": 0.75, "blink_reopen_level": 0.25,
         "blink_event_max_seconds": 4.0, "deep_closure_level": 0.80,
+        "deep_closure_hold_level": 0.70,
+        "deep_closure_release_level": 0.25,
+        "deep_closure_dropout_seconds": 0.20,
         "partial_closure_hysteresis": 0.05,
         "reduced_opening_sustain_seconds": 1.5,
         "sustained_closure_seconds": 0.8, "severe_closure_seconds": 1.2,
@@ -92,6 +95,12 @@ def default_config():
         "blink_start_closure_level": 0.15,
         "blink_closed_closure_level": 0.35, "blink_reopen_level": 0.15,
         "max_dynamic_head_delta_degrees": 12.0,
+        "yawn_calibration_seconds": 30.0,
+        "min_calibration_yawns": 2,
+        "min_calibration_yawn_seconds": 0.8,
+        "min_yawn_mar_gap": 0.15,
+        "yawn_calibration_start_gap": 0.10,
+        "yawn_calibration_return_gap": 0.06,
     })
     config["alerts"] = {
         "suspicion_frequency": 2500, "somnolence_frequency": 3500,

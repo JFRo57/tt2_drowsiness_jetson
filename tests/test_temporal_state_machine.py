@@ -337,5 +337,39 @@ class StateMachineScenarioTests(unittest.TestCase):
         self.assertTrue(reason)
 
 
+    def test_25_brief_deep_closure_dropout_preserves_episode(self):
+        self.feed_for(0.6, step=0.1, ear=0.10)
+        accumulated = self.last_metrics["current_closure_seconds"]
+        self.feed(seconds=0.1, ear=0.19)
+        self.assertTrue(self.last_metrics["deep_closure_active"])
+        self.assertTrue(self.last_metrics["deep_closure_dropout_active"])
+        self.assertAlmostEqual(
+            accumulated + 0.1, self.last_metrics["current_closure_seconds"]
+        )
+        self.feed(seconds=0.1, ear=0.10)
+        self.assertTrue(self.last_metrics["deep_closure_active"])
+        self.assertFalse(self.last_metrics["deep_closure_dropout_active"])
+
+    def test_26_hold_threshold_does_not_lower_entry_threshold(self):
+        self.feed_for(0.5, step=0.1, ear=0.155)
+        self.assertFalse(self.last_metrics["deep_closure_active"])
+        self.feed(seconds=0.1, ear=0.10)
+        self.feed_for(0.5, step=0.1, ear=0.155)
+        self.assertTrue(self.last_metrics["deep_closure_active"])
+        self.assertGreater(self.last_metrics["current_closure_seconds"], 0.0)
+
+    def test_27_short_invalid_measurement_pauses_deep_counter(self):
+        self.feed_for(0.6, step=0.1, ear=0.10)
+        accumulated = self.last_metrics["current_closure_seconds"]
+        self.feed(seconds=0.2, ear=0.10, left_reliable=False,
+                  right_reliable=False)
+        self.assertTrue(self.last_metrics["deep_closure_active"])
+        self.assertAlmostEqual(
+            accumulated + 0.1, self.last_metrics["current_closure_seconds"]
+        )
+        self.feed(seconds=0.1, ear=0.10)
+        self.assertTrue(self.last_metrics["deep_closure_active"])
+
+
 if __name__ == "__main__":
     unittest.main()

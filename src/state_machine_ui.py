@@ -66,8 +66,10 @@ class StateMachineUI(object):
         rows = [
             ("Vision", m.get("vision_state", "--")),
             ("Medicion ocular", "VALIDA" if m.get("eye_measurement_valid") else "NO VALIDA"),
+            ("Perfil ocular instantaneo", m.get("calibrated_profile", "--")),
             ("Cierre normalizado", "--" if closure is None else "%.3f" % closure),
-            ("Cierre profundo", "SI" if m.get("deep_closure_active") else "NO"),
+            ("Cierre profundo", ("PAUSA BREVE" if m.get("deep_closure_dropout_active")
+                                  else ("SI" if m.get("deep_closure_active") else "NO"))),
             ("Tiempo de cierre", "%.2f s" % closed),
             ("Evidencia debil", self._items(m.get("weak_evidence"))),
             ("Evidencia fuerte", self._items(m.get("strong_evidence"))),

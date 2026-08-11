@@ -1,4 +1,4 @@
-# TT2 Drowsiness Jetson V4
+# TT2 Drowsiness Jetson Gamma
 
 > **Detección de somnolencia optimizada para NVIDIA Jetson Nano, con calibración personal, interfaz en tiempo real y alertas GPIO.**
 
@@ -13,7 +13,7 @@
 
 ## 📌 Descripción general
 
-**TT2 Drowsiness Jetson V4** es un sistema embebido para detectar señales de
+**TT2 Drowsiness Jetson Gamma** es la evolución experimental de V4 para detectar señales de
 somnolencia y distracción mediante una cámara CSI. Procesa video en tiempo real,
 localiza el rostro y sus 68 puntos faciales, calcula métricas como **EAR**,
 **MAR**, **PERCLOS**, pose de cabeza y dirección de mirada, y clasifica el nivel
@@ -24,6 +24,11 @@ desarrolladores que trabajen con visión artificial en **NVIDIA Jetson Nano**.
 Además de la interfaz visual, puede activar **LEDs**, un **buzzer pasivo PWM** y
 un switch físico con modos automático, mantenimiento y paro de emergencia.
 
+> **Versión Gamma:** esta edición se publica en la rama `gamma`. Integra la
+> base V4 con calibración personal de bostezos, continuidad temporal mejorada
+> para cierres oculares y tres modelos ONNX complementarios. Consulta el
+> registro completo en [VERSION_GAMMA.md](VERSION_GAMMA.md).
+
 ### Características principales
 
 - Captura CSI por **NVMM/nvarguscamerasrc**, escalado con `nvvidconv` y salida
@@ -33,12 +38,14 @@ un switch físico con modos automático, mantenimiento y paro de emergencia.
 - Estimación de **68 landmarks** con dlib y estabilización temporal contra
   vibraciones del vehículo.
 - Cálculo de **EAR**, **MAR**, **PERCLOS**, mirada y pose de cabeza.
+- Inferencia ONNX complementaria para ojos, bostezo y pose, con degradación
+  segura e informe individual de disponibilidad.
 - Eventos temporales completos de parpadeo, cierre sostenido, bostezo y cabeceo.
 - Máquinas paralelas de somnolencia y confiabilidad de visión, con histéresis,
   recuperación pegajosa y salto crítico desde cualquier estado operativo.
 - Calibración supervisada de **ojos normalmente abiertos**, **apertura ocular
   reducida** y **ojos completamente cerrados**, seguida de observación de
-  parpadeos naturales.
+  parpadeos naturales y calibración personal de bostezos.
 - Umbrales EAR derivados de cada persona, sin asumir un tamaño o forma ocular
   universal.
 - Mediana temporal, histéresis y validación por ojo; los datos inválidos no se
@@ -108,7 +115,7 @@ en [DOCUMENTACION_PROYECTO.md](DOCUMENTACION_PROYECTO.md).
 
 ---
 
-## ⚡ Rendimiento de la V4
+## ⚡ Rendimiento de la base V4 usada por Gamma
 
 La optimización conserva el predictor dlib de 68 puntos y todo el hardware de
 la versión base. El trabajo se reduce en los lugares de mayor costo:

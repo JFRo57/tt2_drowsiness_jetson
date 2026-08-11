@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "description": "Recommended initial classification thresholds for eye state and yawn detection. Separated from model weights.",
+    "optimization_metric": "balanced_accuracy_validation"
+  },
+  "eye_closed_threshold_probability": 0.5,
+  "yawn_threshold_probability": 0.5,
+  "head_pose_thresholds_deg": {
+    "pitch_down_warning": 25.0,
+    "yaw_side_warning": 30.0,
+    "roll_tilt_warning": 20.0
+  }
+}

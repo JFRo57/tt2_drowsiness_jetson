@@ -62,6 +62,10 @@ class CalibrationManagerTests(unittest.TestCase):
             "voluntary_blink_observation_seconds": 1.5,
             "min_natural_blinks": 2,
             "min_voluntary_blinks": 5,
+            "yawn_calibration_seconds": 5.0,
+            "min_calibration_yawns": 2,
+            "min_calibration_yawn_seconds": 0.6,
+            "min_yawn_mar_gap": 0.15,
         })
         self.manager = CalibrationManager(self.config, clock=self.clock)
 
@@ -99,6 +103,17 @@ class CalibrationManagerTests(unittest.TestCase):
             self.clock.advance(0.08)
             if result and result.get("model_ready"):
                 break
+        if self.manager.active_profile == "YAWN":
+            result = self.calibration_yawn() or result
+            result = self.calibration_yawn() or result
+        return result
+
+    def calibration_yawn(self):
+        result = None
+        sequence = [(0.25, 0.10), (0.40, 0.10)] + [(0.62, 0.20)] * 5 + [(0.25, 0.10)]
+        for mar, step in sequence:
+            result = self.manager.update(measured(0.32, mar=mar)) or result
+            self.clock.advance(step)
         return result
 
     def test_three_static_stages_are_per_eye_and_use_reduced_name(self):
@@ -127,6 +142,16 @@ class CalibrationManagerTests(unittest.TestCase):
         self.assertIsNotNone(selected["median_seconds"])
         self.assertIsNotNone(selected["p75_seconds"])
         self.assertIsNotNone(selected["p90_seconds"])
+        mouth = result["profile_data"]["mouth"]
+        self.assertEqual(2, mouth["event_count"])
+        self.assertLess(mouth["closed_threshold"], mouth["open_threshold"])
+        self.assertLess(mouth["open_threshold"], mouth["wide_threshold"])
+        self.assertLess(mouth["wide_threshold"], mouth["peak_mar"])
+        detector = FatigueDetector(self.config, clock=self.clock)
+        self.assertTrue(detector.apply_calibration(result))
+        self.assertAlmostEqual(
+            mouth["wide_threshold"], detector.config["mouth_wide_threshold"]
+        )
         self.assertFalse(os.path.exists(self.manager.profile_path + ".tmp"))
         self.assertFalse(os.path.exists(self.manager.parameters_path + ".tmp"))
         with open(self.manager.parameters_path, "r") as handle:
@@ -417,14 +442,14 @@ class PresentationCalibrationKeyTests(unittest.TestCase):
 
         ui = PresentationUI(default_config())
         app = FakeApp()
-        for key in ("o", "s", "d", "b", "c"):
+        for key in ("o", "s", "d", "b", "y", "c"):
             ui.handle_key(ord(key), app)
         for key in (32, 10, 13):
             ui.handle_key(key, app)
         ui.handle_key(ord("n"), app)
 
         self.assertEqual(
-            ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "FULL"], selected
+            ["OPEN", "REDUCED", "CLOSED", "DYNAMIC", "YAWN", "FULL"], selected
         )
         self.assertEqual(3, len(confirmed))
         self.assertEqual(1, len(skipped))

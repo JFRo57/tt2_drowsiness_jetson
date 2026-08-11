@@ -21,6 +21,7 @@ class CalibrationManager(object):
         "CLOSED": "OJOS COMPLETAMENTE CERRADOS",
         "DYNAMIC_NATURAL": "OBSERVACION NATURAL DE PARPADEOS",
         "DYNAMIC_VOLUNTARY": "PARPADEOS VOLUNTARIOS NORMALES",
+        "YAWN": "CALIBRACION PERSONAL DE BOSTEZOS",
     }
     PROFILE_KEYS = {"OPEN": "O", "REDUCED": "R", "CLOSED": "C"}
     INSTRUCTIONS = {
@@ -33,6 +34,8 @@ class CalibrationManager(object):
         "DYNAMIC_NATURAL": "Mire al frente de manera natural durante un minuto",
         "DYNAMIC_VOLUNTARY": ("Realice entre cinco y ocho parpadeos normales, "
                               "sin exagerarlos"),
+        "YAWN": ("Realice bostezos completos: abra ampliamente la boca, "
+                 "mantengala abierta y cierrela entre cada intento"),
     }
     FEATURES = ("ear", "left_ear", "right_ear", "mar", "pitch", "yaw", "roll")
 
@@ -108,6 +111,13 @@ class CalibrationManager(object):
         self.dynamic_closure = None
         self.dynamic_max_closure = 0.0
         self.dynamic_rejected_events = 0
+        self.yawn_calibration_events = []
+        self.yawn_calibration_state = "NORMAL"
+        self.yawn_calibration_event = None
+        self.yawn_calibration_mar = None
+        self.yawn_calibration_max_mar = 0.0
+        self.mouth_calibration = None
+        self.yawn_only_recalibration = False
         self._load_profile()
 
     def ready_for_monitoring(self):
@@ -150,6 +160,13 @@ class CalibrationManager(object):
             "stages": {},
             "quality": {"fallback": True},
             "blink_baseline": {"selected": {"source": "fallback", "event_count": 0}},
+            "mouth": {
+                "baseline_mar": float(fatigue.get("mouth_closed_threshold", 0.38)),
+                "closed_threshold": float(fatigue.get("mouth_closed_threshold", 0.38)),
+                "open_threshold": float(fatigue.get("mouth_open_threshold", 0.48)),
+                "wide_threshold": float(fatigue.get("mouth_wide_threshold", 0.65)),
+                "event_count": 0, "fallback": True,
+            },
         }
         self.model_ready = True
         self.static_ready = False
@@ -180,6 +197,8 @@ class CalibrationManager(object):
             self.static_ready = False
             self.dynamic_natural_events = []
             self.dynamic_voluntary_events = []
+            self.yawn_calibration_events = []
+            self.yawn_only_recalibration = False
             self.pending_recalibration = True
             requested = "OPEN"
         if requested in ("DYNAMIC", "DYNAMIC_NATURAL"):
@@ -190,6 +209,13 @@ class CalibrationManager(object):
             if not self.static_ready:
                 raise ValueError("Complete primero las tres etapas estaticas")
             return self._start_dynamic("VOLUNTARY")
+        if requested in ("YAWN", "BOSTEZO", "BOSTEZOS"):
+            if not self.static_ready:
+                raise ValueError("Complete primero las tres etapas estaticas")
+            if not (self.dynamic_natural_events or self.dynamic_voluntary_events
+                    or self.profile_data):
+                raise ValueError("Complete primero la calibracion de parpadeos")
+            return self._start_yawn_calibration()
 
         profile = self.PROFILE_ALIASES.get(requested)
         if profile not in self.STATIC_PROFILES:
@@ -213,6 +239,8 @@ class CalibrationManager(object):
             return None
         if self.active_profile in ("DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY"):
             return self._update_dynamic(metrics)
+        if self.active_profile == "YAWN":
+            return self._update_yawn_calibration(metrics)
 
         now = self.clock()
         if self._preparation_active(now):
@@ -279,9 +307,11 @@ class CalibrationManager(object):
             requested = "DYNAMIC_NATURAL"
         elif requested == "DYNAMIC_VOLUNTARY":
             requested = "DYNAMIC_VOLUNTARY"
+        elif requested in ("YAWN", "BOSTEZO", "BOSTEZOS"):
+            requested = "YAWN"
         else:
             requested = self.PROFILE_ALIASES.get(requested)
-        valid_dynamic = requested in ("DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY")
+        valid_dynamic = requested in ("DYNAMIC_NATURAL", "DYNAMIC_VOLUNTARY", "YAWN")
         if requested not in self.STATIC_PROFILES and not valid_dynamic:
             return False
         self.active = False
@@ -393,6 +423,10 @@ class CalibrationManager(object):
             "calibration_dynamic_max_closure": self.dynamic_max_closure,
             "calibration_natural_blinks": len(self.dynamic_natural_events),
             "calibration_voluntary_blinks": len(self.dynamic_voluntary_events),
+            "calibration_yawn_count": len(self.yawn_calibration_events),
+            "calibration_yawn_state": self.yawn_calibration_state,
+            "calibration_yawn_mar": self.yawn_calibration_mar,
+            "calibration_yawn_max_mar": self.yawn_calibration_max_mar,
             "calibrated_ear_threshold": self.thresholds.get("ear_threshold"),
             "calibrated_ear_open_threshold": self.thresholds.get("ear_open_threshold"),
             "reduced_ear_threshold": self.thresholds.get("reduced_ear_threshold"),
@@ -659,12 +693,12 @@ class CalibrationManager(object):
                     if self.dynamic_mode == "NATURAL" else
                     int(self.config.get("min_voluntary_blinks", 5)))
         if self.dynamic_mode == "VOLUNTARY" and len(events) >= required:
-            return self._complete_profile()
+            return self._advance_to_yawn("DYNAMIC_VOLUNTARY")
         if self.progress < 1.0:
             return None
         if self.dynamic_mode == "NATURAL":
             if len(events) >= required:
-                return self._complete_profile()
+                return self._advance_to_yawn("DYNAMIC_NATURAL")
             if self.require_stage_confirmation:
                 self.active = False
                 self.active_profile = None
@@ -689,6 +723,184 @@ class CalibrationManager(object):
                         (len(events), required))
         result = {"accepted": False, "profile": "DYNAMIC_VOLUNTARY",
                   "failed_stage": "DYNAMIC_VOLUNTARY", "model_ready": False,
+                  "reason": self.message}
+        self.last_result = result
+        return result
+
+    def _advance_to_yawn(self, completed_stage):
+        if self.require_stage_confirmation:
+            self.active = False
+            self.active_profile = None
+            self.message = self._confirmation_message("YAWN")
+            return {"accepted": True, "profile": completed_stage,
+                    "next_stage": "YAWN", "model_ready": False,
+                    "reason": self.message}
+        self._start_yawn_calibration()
+        return {"accepted": True, "profile": completed_stage,
+                "yawn_started": True, "model_ready": False,
+                "reason": self.message}
+
+    def _start_yawn_calibration(self):
+        self.yawn_only_recalibration = bool(
+            self.model_ready and self.profile_data
+            and not (self.dynamic_natural_events or self.dynamic_voluntary_events)
+        )
+        self.pending_recalibration = True
+        self.active = True
+        self.active_profile = "YAWN"
+        self.dynamic_mode = None
+        self.started = self.clock()
+        self.capture_started = self.started + self.preparation_seconds
+        self.preparing = self.preparation_seconds > 0.0
+        self.progress = 0.0
+        self.sample_attempts = 0
+        self.sample_rejections = {}
+        self.yawn_calibration_events = []
+        self.yawn_calibration_state = "NORMAL"
+        self.yawn_calibration_event = None
+        self.yawn_calibration_mar = None
+        self.yawn_calibration_max_mar = 0.0
+        self.mouth_calibration = None
+        self.message = self._stage_message("YAWN")
+
+    def _update_yawn_calibration(self, metrics):
+        now = self.clock()
+        if self._preparation_active(now):
+            return None
+        self.sample_attempts += 1
+        duration = float(self.config.get("yawn_calibration_seconds", 30.0))
+        self.progress = min(1.0, (now - self.capture_started) / max(0.1, duration))
+        self._update_yawn_calibration_cycle(metrics, now)
+        required = int(self.config.get("min_calibration_yawns", 2))
+        if len(self.yawn_calibration_events) >= required:
+            error = self._build_mouth_calibration()
+            if error is None:
+                return (self._complete_yawn_recalibration()
+                        if self.yawn_only_recalibration
+                        else self._complete_profile())
+            return self._fail_yawn_calibration(error)
+        if self.progress < 1.0:
+            return None
+        return self._fail_yawn_calibration(
+            "solo %d de %d bostezos completos" %
+            (len(self.yawn_calibration_events), required)
+        )
+
+    def _update_yawn_calibration_cycle(self, metrics, now):
+        if not metrics.get("face_detected", False):
+            self._reject_sample("rostro no detectado durante bostezo")
+            return
+        if float(metrics.get("quality", 0.0)) < self.quality_threshold:
+            self._reject_sample("calidad facial baja durante bostezo")
+            return
+        mar = metrics.get("mar")
+        if mar is None or not np.isfinite(float(mar)):
+            self._reject_sample("MAR no disponible")
+            return
+        mar = float(mar)
+        self.yawn_calibration_mar = mar
+        self.yawn_calibration_max_mar = max(self.yawn_calibration_max_mar, mar)
+        baseline = self._mouth_baseline()
+        start = baseline + float(self.config.get("yawn_calibration_start_gap", 0.10))
+        returned = baseline + float(self.config.get("yawn_calibration_return_gap", 0.06))
+        if self.yawn_calibration_state == "NORMAL":
+            if mar >= start:
+                self.yawn_calibration_state = "ABRIENDO"
+                self.yawn_calibration_event = {
+                    "started_at": now, "maximum_mar": mar, "samples": 1
+                }
+        elif self.yawn_calibration_state == "ABRIENDO":
+            event = self.yawn_calibration_event
+            event["maximum_mar"] = max(event["maximum_mar"], mar)
+            event["samples"] += 1
+            if mar <= returned:
+                event["duration_seconds"] = max(0.0, now - event["started_at"])
+                gap = event["maximum_mar"] - baseline
+                minimum_gap = float(self.config.get("min_yawn_mar_gap", 0.15))
+                minimum_duration = float(
+                    self.config.get("min_calibration_yawn_seconds", 0.8)
+                )
+                if gap >= minimum_gap and event["duration_seconds"] >= minimum_duration:
+                    self.yawn_calibration_events.append(event)
+                else:
+                    self._reject_sample("bostezo incompleto o apertura insuficiente")
+                self.yawn_calibration_state = "NORMAL"
+                self.yawn_calibration_event = None
+
+    def _mouth_baseline(self):
+        opened = self.profiles.get("OPEN", {}).get("mar", {})
+        if opened.get("median") is not None:
+            return float(opened["median"])
+        mouth = (self.profile_data or {}).get("mouth", {})
+        if mouth.get("baseline_mar") is not None:
+            return float(mouth["baseline_mar"])
+        return float(self.full_config.get("fatigue", {}).get(
+            "mouth_closed_threshold", 0.38
+        ))
+
+    def _build_mouth_calibration(self):
+        baseline = self._mouth_baseline()
+        peaks = np.asarray([event["maximum_mar"]
+                            for event in self.yawn_calibration_events], dtype=float)
+        if peaks.size == 0:
+            return "no hay bostezos validos"
+        peak = float(np.median(peaks))
+        gap = peak - baseline
+        if gap < float(self.config.get("min_yawn_mar_gap", 0.15)):
+            return "la apertura de la boca no se distingue del reposo"
+        closed = baseline + 0.18 * gap
+        opening = baseline + 0.38 * gap
+        wide = baseline + 0.72 * gap
+        self.thresholds.update({
+            "mouth_closed_threshold": closed,
+            "mouth_open_threshold": opening,
+            "mouth_wide_threshold": wide,
+        })
+        self.mouth_calibration = {
+            "baseline_mar": baseline, "peak_mar": peak,
+            "peak_mad": float(np.median(np.abs(peaks - peak))),
+            "event_count": int(peaks.size),
+            "closed_threshold": closed, "open_threshold": opening,
+            "wide_threshold": wide,
+            "events": list(self.yawn_calibration_events),
+        }
+        return None
+
+    def _complete_yawn_recalibration(self):
+        profile = dict(self.profile_data)
+        profile["thresholds"] = dict(profile.get("thresholds", {}))
+        profile["thresholds"].update({
+            key: self.thresholds[key] for key in (
+                "mouth_closed_threshold", "mouth_open_threshold",
+                "mouth_wide_threshold"
+            )
+        })
+        profile["mouth"] = dict(self.mouth_calibration or {})
+        profile["calibrated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        saved_profile = self._save_profile(profile)
+        saved_parameters = self._save_parameters(self._parameter_export(profile))
+        self.profile_data = profile
+        self.model_ready = True
+        self.pending_recalibration = False
+        self.active = False
+        self.active_profile = None
+        self.last_failed_stage = None
+        self.yawn_only_recalibration = False
+        self.message = "Calibracion de bostezos completa; umbrales guardados"
+        result = {"accepted": True, "profile": "YAWN",
+                  "profile_data": profile, "thresholds": dict(self.thresholds),
+                  "model_ready": True, "profile_saved": saved_profile,
+                  "parameters_saved": saved_parameters, "reason": self.message}
+        self.last_result = result
+        return result
+
+    def _fail_yawn_calibration(self, detail):
+        self.active = False
+        self.active_profile = None
+        self.last_failed_stage = "YAWN"
+        self.message = "Calibracion de bostezos invalida: %s. Repita esta etapa." % detail
+        result = {"accepted": False, "profile": "YAWN",
+                  "failed_stage": "YAWN", "model_ready": False,
                   "reason": self.message}
         self.last_result = result
         return result
@@ -860,6 +1072,10 @@ class CalibrationManager(object):
             "rejected_events": self.dynamic_rejected_events,
             "selected_source": selected["source"],
         }
+        quality["yawn"] = {
+            "events": len(self.yawn_calibration_events),
+            "rejections": dict(self.sample_rejections),
+        }
         profile = {
             "format_version": self.FORMAT_VERSION,
             "calibrated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -868,6 +1084,7 @@ class CalibrationManager(object):
             "partial_closure_normalized": self.thresholds["partial_closure_normalized"],
             "blink_baseline": {"natural": natural_stats, "voluntary": voluntary_stats,
                                "selected": selected},
+            "mouth": dict(self.mouth_calibration or {}),
             "neutral_head_pose": neutral, "quality": quality,
             "thresholds": dict(self.thresholds), "stages": dict(self.profiles),
         }
@@ -908,6 +1125,8 @@ class CalibrationManager(object):
             "natural_blink_observation_seconds",
             "voluntary_blink_observation_seconds", "min_natural_blinks",
             "min_voluntary_blinks", "calibration_blink_max_seconds",
+            "yawn_calibration_seconds", "min_calibration_yawns",
+            "min_calibration_yawn_seconds", "min_yawn_mar_gap",
         )
         calibration_settings = {}
         for key in keys:
@@ -923,6 +1142,7 @@ class CalibrationManager(object):
                 "partial_closure_normalized"
             ),
             "blink_baseline": profile.get("blink_baseline", {}),
+            "mouth": profile.get("mouth", {}),
             "neutral_head_pose": profile.get("neutral_head_pose", {}),
             "quality": profile.get("quality", {}),
             "thresholds": profile.get("thresholds", {}),

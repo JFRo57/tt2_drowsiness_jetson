@@ -117,6 +117,10 @@ class FatigueDetector(object):
             self.ear_open_threshold = self.ear_threshold + self.ear_hysteresis
         if thresholds.get("open_pitch_reference") is not None:
             self.head_pitch_baseline = float(thresholds["open_pitch_reference"])
+        for key in ("mouth_closed_threshold", "mouth_open_threshold",
+                    "mouth_wide_threshold"):
+            if thresholds.get(key) is not None:
+                self.config[key] = float(thresholds[key])
         if profile is None:
             return False
         self.profile = profile

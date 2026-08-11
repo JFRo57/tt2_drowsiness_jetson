@@ -1,0 +1,120 @@
+{
+  "package_name": "fatigue_model_package",
+  "version": "1.0.0",
+  "export_date": "2026-07-24",
+  "framework_versions": {
+    "pytorch": "2.13.0+cpu",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.27.0"
+  },
+  "models": {
+    "eye_state": {
+      "model_file": "eye_state.onnx",
+      "sha256": "556144cc7ca07d87f6431c401744d563661989c395e1afdc5d1202d3895f5749",
+      "file_size_bytes": 425405,
+      "parameter_count": 105778,
+      "input_shape": [
+        1,
+        1,
+        64,
+        64
+      ],
+      "data_type": "float32",
+      "channels": 1,
+      "color_space": "Grayscale",
+      "resize_method": "cv2.INTER_AREA",
+      "normalization": "[0.0, 1.0]",
+      "mean": [
+        0.0
+      ],
+      "std": [
+        1.0
+      ],
+      "outputs": [
+        "logits"
+      ],
+      "classes": [
+        "closed",
+        "open"
+      ],
+      "output_type": "logits",
+      "numerical_verification": {
+        "max_abs_diff": 1.1920928955078125e-07,
+        "mean_abs_diff": 8.940696716308594e-08
+      }
+    },
+    "yawn_state": {
+      "model_file": "yawn_state.onnx",
+      "sha256": "12cfa2a7d241d5866e4b095524fdfebdd6ca33e671782dfd3bc0b16193055aee",
+      "file_size_bytes": 425405,
+      "parameter_count": 105778,
+      "input_shape": [
+        1,
+        1,
+        64,
+        96
+      ],
+      "data_type": "float32",
+      "channels": 1,
+      "color_space": "Grayscale",
+      "resize_method": "cv2.INTER_AREA",
+      "normalization": "[0.0, 1.0]",
+      "mean": [
+        0.0
+      ],
+      "std": [
+        1.0
+      ],
+      "outputs": [
+        "logits"
+      ],
+      "classes": [
+        "normal",
+        "yawning"
+      ],
+      "output_type": "logits",
+      "numerical_verification": {
+        "max_abs_diff": 5.960464477539063e-08,
+        "mean_abs_diff": 2.9802322387695312e-08
+      }
+    },
+    "head_pose": {
+      "model_file": "head_pose.onnx",
+      "sha256": "80b3c60c3203181fd0c3ce1dcb5fa6636b753c0fa82433871d48c0498c264e9c",
+      "file_size_bytes": 4050981,
+      "parameter_count": 1012515,
+      "input_shape": [
+        1,
+        3,
+        128,
+        128
+      ],
+      "data_type": "float32",
+      "channels": 3,
+      "color_space": "RGB",
+      "resize_method": "cv2.INTER_AREA",
+      "normalization": "[0.0, 1.0]",
+      "mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "std": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "outputs": [
+        "pitch_deg",
+        "yaw_deg",
+        "roll_deg"
+      ],
+      "output_unit": "degrees",
+      "output_type": "continuous_angles",
+      "numerical_verification": {
+        "max_abs_diff": 4.57763671875e-05,
+        "mean_abs_diff": 2.1457672119140625e-05
+      }
+    }
+  }
+}
